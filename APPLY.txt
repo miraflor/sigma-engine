@@ -1,0 +1,26 @@
+SIGMA Engine 0.2.7 Fast-MWAS-default overlay
+
+Baseline
+--------
+Apply this overlay directly to the authoritative sigma-engine 0.2.6 tree supplied on
+2026-10-01 after the Voronoi regression-test correction. Extract/copy it into the
+repository root and allow replacement of matching files.
+
+Main change
+-----------
+- Restricted Gradient Extraction (RGE) is removed.
+- Maximum-weight acyclic subgraph (MWAS) is restored.
+- Fast deterministic descending-weight cycle-avoidance MWAS is the default.
+- Exact zero-gap SciPy/HiGHS MILP MWAS remains available with --mwas-method exact.
+- Fast mode is explicitly reported as heuristic/non-optimal; exact mode must prove an optimum.
+- sigma_io_dag.csv is written immediately after the IO-DAG stage.
+- Existing clustering, center, distance, Voronoi fallback, checkpoint, and provenance annotations remain.
+
+Verification
+------------
+    python -m pip install -e ".[dev]"
+    python -m compileall -q src tests
+    python -m pytest -q
+    python -c "import sigma_engine; print(sigma_engine.__version__)"
+
+Expected version: 0.2.7

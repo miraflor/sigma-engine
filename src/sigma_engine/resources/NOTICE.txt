@@ -1,0 +1,28 @@
+Bundled Philippine input-output resources
+==========================================
+
+Files
+-----
+- psa_2018_io80.csv: 2018 benchmark 80-industry transaction matrix.
+- psa_2018_io16.csv: 2018 benchmark 16-industry transaction matrix.
+
+Rows are suppliers and columns are users. Values are in million Philippine pesos.
+Sector identifiers are normalized to SIGMA's canonical 01..80 / 01..16 ordering.
+
+Source
+------
+Philippine Statistics Authority, "PSA releases the 2018 Input-Output Tables",
+Reference No. 2021-510, released 9 December 2021.
+https://psa.gov.ph/content/psa-releases-2018-input-output-tables
+
+The PSA page states that the 2018 benchmark accounts include transaction tables at
+16x16, 80x80, and 240x240 resolution. The PSA website states that its data and content
+are licensed under CC BY 4.0 unless otherwise stated.
+
+Normalization
+-------------
+The packaged CSVs contain only the square intermediate transaction blocks needed by
+SIGMA Engine. Presentation-only rows/columns are omitted and sector positions are
+renamed to canonical two-digit identifiers. No weights are rescaled or approximated.
+The IO16 and IO80 matrices have the same total intermediate use:
+18,274,281.3667199 million PHP.

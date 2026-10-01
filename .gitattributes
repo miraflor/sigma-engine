@@ -1,0 +1,2 @@
+# Keep packaged economic-model resources byte-stable across platforms.
+src/sigma_engine/resources/*.csv text eol=lf
