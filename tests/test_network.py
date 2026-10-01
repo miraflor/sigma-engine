@@ -54,3 +54,25 @@ def test_reversing_source_line_does_not_change_augmented_nodes_or_median_geometr
     assert network_1_median(aug1, aug1.point_node).geometry.equals(
         network_1_median(aug2, aug2.point_node).geometry
     )
+
+
+def test_augmented_network_checkpoint_frame_round_trip_preserves_distances():
+    from sigma_engine.network import AugmentedNetwork
+
+    roads = gpd.GeoDataFrame(
+        geometry=[LineString([(0, 0), (10, 0)]), LineString([(10, 0), (20, 0)])],
+        crs="EPSG:3857",
+    )
+    points = gpd.GeoDataFrame(geometry=[Point(2, 0), Point(18, 0)], crs=roads.crs)
+    base = RoadNetwork.from_geodataframe(roads)
+    original = base.augment(base.snap(points))
+
+    restored = AugmentedNetwork.from_checkpoint_frames(
+        original.nodes.copy(), original.edges.copy(), original.point_node.copy()
+    )
+
+    assert restored.graph.number_of_nodes() == original.graph.number_of_nodes()
+    assert restored.graph.number_of_edges() == original.graph.number_of_edges()
+    assert restored.point_node.tolist() == original.point_node.tolist()
+    source, target = map(int, restored.point_node)
+    assert restored.distance(source, target) == original.distance(source, target)

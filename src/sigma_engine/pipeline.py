@@ -26,7 +26,7 @@ from .clustering import (
 from .builtin_io import load_engine_io_table
 from .io_dag import io_network, solve_mwas
 from .io_utils import read_vector, write_geoparquet
-from .network import RoadNetwork, SnappedPoints
+from .network import AugmentedNetwork, RoadNetwork, SnappedPoints
 from .point_input import prepare_point_input
 from .progress import ProgressCallback, ProgressReporter
 from .spatial_graph import directed_eigenvector_centrality, instantiate_network, make_node_id
@@ -446,7 +446,14 @@ def _crs_linear_unit_name(crs: object) -> str | None:
 
 _CHECKPOINT_SCHEMA = 1
 _CHECKPOINT_DIRNAME = ".sigma_checkpoints"
-_STAGE_ORDER = ("clustering", "centers", "point_center_distances", "voronoi", "network_x")
+_STAGE_ORDER = (
+    "clustering",
+    "augmented_roads",
+    "centers",
+    "point_center_distances",
+    "voronoi",
+    "network_x",
+)
 _STAGE_EVENT_COLUMNS = [
     "stage", "type", "cluster", "status", "action", "attempt",
     "requested_resolution", "used_resolution", "error",
@@ -550,19 +557,66 @@ def _checkpoint_done(state: dict[str, object], stage: str, *, allow_resume: bool
     return allow_resume and stage in set(state.get("completed_stages", []))
 
 
-def _mark_checkpoint(manifest_path: Path, state: dict[str, object], stage: str, stage_events: list[dict[str, object]]) -> None:
+def _mark_checkpoint(
+    manifest_path: Path,
+    state: dict[str, object],
+    stage: str,
+    stage_events: list[dict[str, object]],
+) -> None:
     completed = [str(x) for x in state.get("completed_stages", [])]
-    if stage not in completed:
-        completed.append(stage)
-    state["completed_stages"] = completed
+    completed_set = set(completed)
+    completed_set.add(stage)
+    ordered = [name for name in _STAGE_ORDER if name in completed_set]
+    ordered.extend(
+        name for name in completed if name not in _STAGE_ORDER and name != stage
+    )
+    if stage not in _STAGE_ORDER and stage not in ordered:
+        ordered.append(stage)
+    state["completed_stages"] = ordered
     state["stage_events"] = stage_events
-    state["last_completed_stage"] = stage
+    state["last_completed_stage"] = ordered[-1] if ordered else stage
     _atomic_json(manifest_path, state)
 
 
 def _load_stage_events(state: dict[str, object]) -> list[dict[str, object]]:
     rows = state.get("stage_events", [])
     return [dict(row) for row in rows] if isinstance(rows, list) else []
+
+
+def _atomic_npy(path: Path, values: np.ndarray) -> None:
+    """Atomically write a non-pickled NumPy checkpoint array."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("wb") as handle:
+        np.save(handle, np.asarray(values), allow_pickle=False)
+    tmp.replace(path)
+
+
+def _restore_augmented_roads(
+    nodes_path: Path,
+    edges_path: Path,
+    point_node_path: Path,
+    source_pos_path: Path,
+    expected_source_pos: np.ndarray,
+    expected_crs: object,
+) -> AugmentedNetwork:
+    """Restore a portable augmented-road checkpoint and verify row alignment."""
+    nodes = gpd.read_parquet(nodes_path)
+    edges = gpd.read_parquet(edges_path)
+    with point_node_path.open("rb") as handle:
+        point_node = np.load(handle, allow_pickle=False)
+    with source_pos_path.open("rb") as handle:
+        source_pos = np.load(handle, allow_pickle=False)
+    source_pos = np.asarray(source_pos, dtype=np.int64)
+    expected_source_pos = np.asarray(expected_source_pos, dtype=np.int64)
+    if source_pos.ndim != 1 or not np.array_equal(source_pos, expected_source_pos):
+        raise ValueError("augmented-road checkpoint does not match retained clustering rows")
+    if nodes.crs != expected_crs or edges.crs != expected_crs:
+        raise ValueError("augmented-road checkpoint CRS does not match the current road input")
+    augmented = AugmentedNetwork.from_checkpoint_frames(nodes, edges, point_node)
+    if len(augmented.point_node) != len(expected_source_pos):
+        raise ValueError("augmented-road checkpoint point count does not match retained points")
+    return augmented
 
 
 def _write_stage_csv(rows: list[dict[str, object]], columns: list[str], path: Path) -> Path:
@@ -753,27 +807,74 @@ def run_engine(config: EngineConfig) -> EngineResult:
 
     # Build SIGMA's exact continuous-position augmented graph only for retained observations.
     # This preserves downstream center/distance semantics while avoiding augmentation work for
-    # HDBSCAN noise that will never enter the economic network.
-    report("roads: adapting sparse graph and inserting retained point positions")
-    roads = RoadNetwork.from_sparse_graph(
-        sparse_context.graph, roads_gdf.crs, vertex_digits=config.vertex_digits
-    )
+    # HDBSCAN noise that will never enter the economic network.  The augmented graph is a
+    # durable checkpoint because production road insertion can be material even when every
+    # later analytical stage is already resumable.
     source_pos = retained["_sparse_source_pos"].to_numpy(np.int64, copy=False)
-    sparse_snaps = sparse_context.snaps.subset(source_pos)
-    snapped_retained = SnappedPoints(
-        pd.DataFrame(
-            {
-                "source_pos": np.arange(len(retained), dtype=np.int64),
-                "edge_pos": sparse_context.edge_id[source_pos],
-                "edge_id": sparse_context.edge_id[source_pos],
-                "offset": sparse_snaps.offset,
-                "snap_distance": sparse_snaps.snap_distance,
-                "snapped_geometry": list(shapely.points(sparse_snaps.snapped_xy)),
-            }
-        ),
-        roads.crs,
+    augmented_nodes_checkpoint = checkpoint_dir / "augmented_road_nodes.parquet"
+    augmented_edges_checkpoint = checkpoint_dir / "augmented_road_edges.parquet"
+    augmented_point_node_checkpoint = checkpoint_dir / "augmented_road_point_node.npy"
+    augmented_source_pos_checkpoint = checkpoint_dir / "augmented_road_source_pos.npy"
+    augmented_files = (
+        augmented_nodes_checkpoint,
+        augmented_edges_checkpoint,
+        augmented_point_node_checkpoint,
+        augmented_source_pos_checkpoint,
     )
-    augmented = roads.augment(snapped_retained, progress=report)
+    augmented = None
+    if (
+        _checkpoint_done(checkpoint_state, "augmented_roads", allow_resume=allow_resume)
+        and all(path.exists() for path in augmented_files)
+    ):
+        try:
+            augmented = _restore_augmented_roads(
+                augmented_nodes_checkpoint,
+                augmented_edges_checkpoint,
+                augmented_point_node_checkpoint,
+                augmented_source_pos_checkpoint,
+                source_pos,
+                roads_gdf.crs,
+            )
+            report("checkpoint: restoring completed augmented road graph")
+        except Exception as exc:
+            report(
+                "checkpoint: augmented road graph is unreadable or incompatible; "
+                f"rebuilding ({exc})"
+            )
+            augmented = None
+
+    if augmented is None:
+        report("roads: adapting sparse graph and inserting retained point positions")
+        roads = RoadNetwork.from_sparse_graph(
+            sparse_context.graph, roads_gdf.crs, vertex_digits=config.vertex_digits
+        )
+        sparse_snaps = sparse_context.snaps.subset(source_pos)
+        snapped_retained = SnappedPoints(
+            pd.DataFrame(
+                {
+                    "source_pos": np.arange(len(retained), dtype=np.int64),
+                    "edge_pos": sparse_context.edge_id[source_pos],
+                    "edge_id": sparse_context.edge_id[source_pos],
+                    "offset": sparse_snaps.offset,
+                    "snap_distance": sparse_snaps.snap_distance,
+                    "snapped_geometry": list(shapely.points(sparse_snaps.snapped_xy)),
+                }
+            ),
+            roads.crs,
+        )
+        augmented = roads.augment(snapped_retained, progress=report)
+        report("checkpoint: writing augmented road graph")
+        write_geoparquet(augmented.nodes, augmented_nodes_checkpoint)
+        write_geoparquet(augmented.edges, augmented_edges_checkpoint)
+        _atomic_npy(
+            augmented_point_node_checkpoint,
+            augmented.point_node.astype(np.int64, copy=False),
+        )
+        _atomic_npy(augmented_source_pos_checkpoint, source_pos.astype(np.int64, copy=False))
+        _mark_checkpoint(
+            checkpoint_manifest_path, checkpoint_state, "augmented_roads", stage_events
+        )
+
     retained["network_node"] = augmented.point_node
     retained = retained.drop(columns="_sparse_source_pos")
     component_by_node = augmented.component_id()

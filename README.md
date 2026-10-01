@@ -464,14 +464,21 @@ in `.sigma_checkpoints/manifest.json` inside the output directory.
 The durable stages are:
 
 1. clustering;
-2. network 1-median centers;
-3. point-to-center distances;
-4. Voronoi partitions; and
-5. spatial network `X`.
+2. the retained-point augmented road graph;
+3. network 1-median centers;
+4. point-to-center distances;
+5. Voronoi partitions; and
+6. spatial network `X`.
 
-The sparse road graph is rebuilt on resume because it is cheap relative to these stages and
-keeps the checkpoint representation portable. The expensive completed stage itself is not
-recomputed.
+The augmented-road checkpoint is stored portably as GeoParquet node/edge tables plus
+non-pickled NumPy arrays for retained-point node IDs and clustering-row alignment. On restore,
+SIGMA validates the CRS, graph IDs, edge lengths, point-node references, and exact retained-row
+alignment before reuse. A missing, damaged, or incompatible augmented-road checkpoint is
+reconstructed and overwritten rather than trusted. The first run after upgrading from an older
+0.2.7 checkout therefore rebuilds the augmented road graph once; subsequent matching resumes
+restore it directly. Its internal files are `augmented_road_nodes.parquet`,
+`augmented_road_edges.parquet`, `augmented_road_point_node.npy`, and
+`augmented_road_source_pos.npy` under `.sigma_checkpoints/`.
 
 Use `--no-resume` to recompute all stages from scratch while continuing to write new
 checkpoints, or `--restart` to explicitly remove prior SIGMA artifacts/checkpoints in the

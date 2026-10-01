@@ -1,6 +1,7 @@
 import json
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import pytest
 from shapely.geometry import LineString, Point, box
@@ -291,3 +292,55 @@ def test_restart_invalidates_checkpoint(tmp_path, monkeypatch):
     assert called["cluster"] == 1
     manifest = json.loads((out / ".sigma_checkpoints" / "manifest.json").read_text())
     assert manifest["final_output_complete"] is True
+
+
+def test_resume_restores_augmented_road_graph_without_reaugmentation(tmp_path, monkeypatch):
+    import sigma_engine.pipeline as pipeline_module
+
+    config, out = _checkpoint_fixture(tmp_path)
+    first = run_engine(config)
+    assert len(first.points) > 0
+
+    checkpoint_dir = out / ".sigma_checkpoints"
+    manifest = json.loads((checkpoint_dir / "manifest.json").read_text())
+    assert "augmented_roads" in manifest["completed_stages"]
+    assert (checkpoint_dir / "augmented_road_nodes.parquet").exists()
+    assert (checkpoint_dir / "augmented_road_edges.parquet").exists()
+    assert (checkpoint_dir / "augmented_road_point_node.npy").exists()
+    assert (checkpoint_dir / "augmented_road_source_pos.npy").exists()
+
+    def augmentation_must_not_run(*args, **kwargs):
+        raise AssertionError("augmented road graph was recomputed instead of resumed")
+
+    monkeypatch.setattr(pipeline_module.RoadNetwork, "augment", augmentation_must_not_run)
+    resumed = run_engine(config)
+    assert len(resumed.points) == len(first.points)
+
+
+def test_misaligned_augmented_road_checkpoint_is_rebuilt(tmp_path, monkeypatch):
+    import sigma_engine.pipeline as pipeline_module
+
+    config, out = _checkpoint_fixture(tmp_path)
+    run_engine(config)
+    checkpoint_dir = out / ".sigma_checkpoints"
+    source_pos_path = checkpoint_dir / "augmented_road_source_pos.npy"
+    with source_pos_path.open("wb") as handle:
+        np.save(handle, np.asarray([999], dtype=np.int64), allow_pickle=False)
+
+    original_augment = pipeline_module.RoadNetwork.augment
+    calls = {"augment": 0}
+
+    def counted_augment(self, *args, **kwargs):
+        calls["augment"] += 1
+        return original_augment(self, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module.RoadNetwork, "augment", counted_augment)
+    result = run_engine(config)
+    assert len(result.points) > 0
+    assert calls["augment"] == 1
+
+    with source_pos_path.open("rb") as handle:
+        restored_source_pos = np.load(handle, allow_pickle=False)
+    assert restored_source_pos.ndim == 1
+    assert len(restored_source_pos) > 1
+    assert not np.array_equal(restored_source_pos, np.asarray([999], dtype=np.int64))

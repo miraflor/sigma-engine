@@ -1,0 +1,23 @@
+SIGMA Engine 0.2.7 augmented-road checkpoint hotfix
+
+Apply over the current 0.2.7 checkout after the network-X memory hotfix:
+
+  Expand-Archive `
+    -Path "C:\Users\James Matthew\Downloads\sigma-engine-augmented-road-checkpoint-overlay.zip" `
+    -DestinationPath . `
+    -Force
+
+Then run:
+
+  python -m pytest -q
+
+No reinstall is needed for an editable installation.
+
+Behavior:
+- the first matching run after this hotfix builds the retained-point augmented road graph once
+  and writes it under .sigma_checkpoints/;
+- later matching resumed runs restore that graph instead of repeating road augmentation;
+- a missing, unreadable, misaligned, or structurally invalid augmented-road checkpoint is
+  rebuilt and overwritten automatically;
+- engine version remains 0.2.7 so existing clustering/center/distance/Voronoi/network-X
+  checkpoints remain reusable.

@@ -503,6 +503,99 @@ class AugmentedNetwork:
     edges: gpd.GeoDataFrame
     point_node: np.ndarray
 
+    @classmethod
+    def from_checkpoint_frames(
+        cls,
+        nodes: gpd.GeoDataFrame,
+        edges: gpd.GeoDataFrame,
+        point_node: np.ndarray,
+    ) -> "AugmentedNetwork":
+        """Reconstruct and validate an augmented network from durable checkpoint tables.
+
+        The checkpoint stores portable GeoParquet tables rather than a pickled NetworkX
+        object.  On restore we rebuild the lightweight graph container and verify the
+        invariants required by the sparse shortest-path representation.  This makes a
+        damaged or incompatible checkpoint fail closed so the pipeline can rebuild it.
+        """
+        required_nodes = {"network_node", "geometry"}
+        required_edges = {"u", "v", "length", "parent_edge_id", "aug_edge_id", "geometry"}
+        missing_nodes = required_nodes - set(nodes.columns)
+        missing_edges = required_edges - set(edges.columns)
+        if missing_nodes:
+            raise ValueError(
+                f"augmented-road node checkpoint is missing columns: {sorted(missing_nodes)}"
+            )
+        if missing_edges:
+            raise ValueError(
+                f"augmented-road edge checkpoint is missing columns: {sorted(missing_edges)}"
+            )
+        if nodes.crs is None or edges.crs is None:
+            raise ValueError("augmented-road checkpoint CRS is missing")
+        if nodes.crs != edges.crs:
+            raise ValueError("augmented-road checkpoint node/edge CRS mismatch")
+
+        restored_nodes = nodes.sort_values("network_node", kind="stable").reset_index(drop=True)
+        node_ids = restored_nodes["network_node"].to_numpy(np.int64, copy=False)
+        expected_ids = np.arange(len(restored_nodes), dtype=np.int64)
+        if not np.array_equal(node_ids, expected_ids):
+            raise ValueError("augmented-road checkpoint node IDs are not contiguous from zero")
+        if restored_nodes.geometry.is_empty.any() or restored_nodes.geometry.isna().any():
+            raise ValueError("augmented-road checkpoint contains empty node geometry")
+        if not (restored_nodes.geometry.geom_type == "Point").all():
+            raise ValueError("augmented-road checkpoint nodes must be Point geometries")
+
+        restored_edges = edges.sort_values("aug_edge_id", kind="stable").reset_index(drop=True)
+        aug_edge_ids = restored_edges["aug_edge_id"].to_numpy(np.int64, copy=False)
+        if not np.array_equal(aug_edge_ids, np.arange(len(restored_edges), dtype=np.int64)):
+            raise ValueError("augmented-road checkpoint edge IDs are not contiguous from zero")
+        u = restored_edges["u"].to_numpy(np.int64, copy=False)
+        v = restored_edges["v"].to_numpy(np.int64, copy=False)
+        length = restored_edges["length"].to_numpy(float, copy=False)
+        if len(restored_edges) == 0:
+            raise ValueError("augmented-road checkpoint contains no edges")
+        if (
+            u.min() < 0
+            or v.min() < 0
+            or u.max() >= len(restored_nodes)
+            or v.max() >= len(restored_nodes)
+        ):
+            raise ValueError("augmented-road checkpoint edge references an unknown node")
+        if not np.isfinite(length).all() or (length <= 0).any():
+            raise ValueError("augmented-road checkpoint contains invalid edge length")
+        if restored_edges.geometry.is_empty.any() or restored_edges.geometry.isna().any():
+            raise ValueError("augmented-road checkpoint contains empty edge geometry")
+
+        point_node = np.asarray(point_node, dtype=np.int64)
+        if point_node.ndim != 1:
+            raise ValueError("augmented-road point-node checkpoint must be one-dimensional")
+        if point_node.size and (point_node.min() < 0 or point_node.max() >= len(restored_nodes)):
+            raise ValueError("augmented-road point-node checkpoint references an unknown node")
+
+        graph = nx.Graph()
+        xy = shapely.get_coordinates(restored_nodes.geometry.to_numpy())
+        if len(xy) != len(restored_nodes):
+            raise ValueError("augmented-road checkpoint node geometry is malformed")
+        graph.add_nodes_from(
+            (int(node), {"x": float(coord[0]), "y": float(coord[1])})
+            for node, coord in zip(node_ids, xy, strict=True)
+        )
+        graph.add_edges_from(
+            (
+                int(row.u),
+                int(row.v),
+                {
+                    "length": float(row.length),
+                    "parent_edge_id": int(row.parent_edge_id),
+                    "aug_edge_id": int(row.aug_edge_id),
+                },
+            )
+            for row in restored_edges.itertuples(index=False)
+        )
+        if graph.number_of_edges() != len(restored_edges):
+            raise ValueError("augmented-road checkpoint contains duplicate graph edges")
+
+        return cls(nodes.crs, graph, restored_nodes, restored_edges, point_node.copy())
+
     @cached_property
     def sparse_adjacency(self):
         """Symmetric CSR adjacency reused by all shortest-path queries."""
