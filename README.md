@@ -373,6 +373,13 @@ larger road distance increases `weight` rather than penalizing it.
 If two centers are disconnected on the road graph, the edge is not created and the pair is
 written to `sigma_disconnected_overlap_pairs.csv`.
 
+Center-to-center road distances are evaluated in a bounded-memory source-center sweep. For
+one source road node, SIGMA computes one SciPy shortest-path vector, extracts only the target
+centers required by spatial overlaps across all of that sector's outgoing IO-DAG edges, and
+discards the full vector immediately. Source clusters sharing the same center road node reuse
+that one computation. SIGMA therefore does not retain an all-road-node distance dictionary for
+every center while constructing `X`.
+
 ## Directed eigenvector centrality and the DAG consequence
 
 The direction convention is explicit:
@@ -458,8 +465,9 @@ The durable stages are:
 
 1. clustering;
 2. network 1-median centers;
-3. point-to-center distances; and
-4. Voronoi partitions.
+3. point-to-center distances;
+4. Voronoi partitions; and
+5. spatial network `X`.
 
 The sparse road graph is rebuilt on resume because it is cheap relative to these stages and
 keeps the checkpoint representation portable. The expensive completed stage itself is not
@@ -477,7 +485,9 @@ Stage artifacts are written as soon as their stage succeeds:
 - `sigma_points_with_center_distance.parquet` after point-center distances;
 - `sigma_partitions.parquet` and `sigma_points_partitioned.parquet` after Voronoi;
 - `sigma_io_dag.csv` immediately after MWAS; and
-- `sigma_X_nodes.csv` / `sigma_X_edges.csv` immediately after network X construction.
+- `sigma_X_nodes.csv` / `sigma_X_edges.csv` immediately after network X construction; and
+- `sigma_disconnected_overlap_pairs.csv` immediately after network X construction (header-only
+  when there are no disconnected overlap pairs).
 
 `sigma_stage_events.csv` is refreshed after every durable stage, so recoveries/skips remain
 auditable even if a later stage crashes. Final outputs overwrite/complete the corresponding

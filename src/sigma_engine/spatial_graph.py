@@ -134,7 +134,9 @@ def instantiate_network(
 
     Every center becomes a node before edges are considered, so isolated clusters are
     retained.  For each IO-DAG type edge, only positive-area polygon overlaps create a
-    cluster edge.  The road distance is measured between the two network 1-medians.
+    cluster edge.  Center-to-center road distances are evaluated one source center at a
+    time and only requested target values are retained.  This keeps memory bounded instead
+    of caching a full road-network distance dictionary for every source center.
     """
     _validate_spatial_inputs(centers, partitions, io_dag)
 
@@ -154,61 +156,83 @@ def instantiate_network(
         )
 
     diagnostics: list[dict[str, object]] = []
-    distance_cache: dict[int, dict[int, float]] = {}
     partitions_by_type = {
         str(type_value): group.reset_index(drop=True)
         for type_value, group in partitions.groupby("type", sort=False)
     }
 
-    active_edges = [
-        (type1, type2, edge_data)
-        for type1, type2, edge_data in io_dag.edges(data=True)
-        if str(type1) in partitions_by_type and str(type2) in partitions_by_type
-    ]
-    total_active_edges = len(active_edges)
-    edge_step = max(1, total_active_edges // 20)
+    # NetworkX iterates outgoing edges by source node.  Preserve that deterministic source
+    # ordering, but process all outgoing IO edges for one source type together.  A cluster's
+    # source-center Dijkstra run can then serve every overlapping target type without any
+    # long-lived all-network distance cache.
+    outgoing_by_type: dict[str, list[tuple[str, dict[str, object]]]] = {}
+    for type1, type2, edge_data in io_dag.edges(data=True):
+        source_type, target_type = str(type1), str(type2)
+        if source_type not in partitions_by_type or target_type not in partitions_by_type:
+            continue
+        outgoing_by_type.setdefault(source_type, []).append((target_type, edge_data))
 
-    for edge_number, (type1, type2, edge_data) in enumerate(active_edges, start=1):
-        type1, type2 = str(type1), str(type2)
-        if progress is not None and (
-            edge_number == 1 or edge_number % edge_step == 0 or edge_number == total_active_edges
-        ):
-            progress(
-                f"network X: IO edge {edge_number:,}/{total_active_edges:,} "
-                f"{type1}->{type2}; current X edges={graph.number_of_edges():,}"
-            )
-
-        dag_weight = float(edge_data["weight"])
-        if not np.isfinite(dag_weight) or dag_weight <= 0:
-            raise ValueError(
-                f"IO-DAG edge {type1!r}->{type2!r} has non-positive/non-finite weight"
-            )
-
+    active_source_types = list(outgoing_by_type)
+    total_source_types = len(active_source_types)
+    for type_number, type1 in enumerate(active_source_types, start=1):
         source_partitions = partitions_by_type[type1]
-        target_partitions = partitions_by_type[type2]
-
-        for _, source_partition in source_partitions.iterrows():
-            target_positions = _positive_area_overlaps(
-                source_partition.geometry,
-                target_partitions,
+        outgoing = outgoing_by_type[type1]
+        if progress is not None:
+            progress(
+                f"network X: source type {type_number:,}/{total_source_types:,} {type1!r}; "
+                f"{len(source_partitions):,} source partitions; current X edges={graph.number_of_edges():,}"
             )
-            for target_position in target_positions:
-                target_partition = target_partitions.iloc[target_position]
-                cluster1 = int(source_partition["cluster"])
-                cluster2 = int(target_partition["cluster"])
 
-                source_center = center_index[(type1, cluster1)]
-                target_center = center_index[(type2, cluster2)]
-                source_network_node = int(source_center["center_network_node"])
-                target_network_node = int(target_center["center_network_node"])
+        # Group source partitions that happen to share the same median road node.  This is
+        # exact because shortest-path distance depends on the road node, while overlap
+        # geometry and cluster identity remain attached to each candidate edge below.
+        work_by_source_node: dict[int, list[tuple[str, int, int, int, float]]] = {}
+        for _, source_partition in source_partitions.iterrows():
+            cluster1 = int(source_partition["cluster"])
+            source_center = center_index[(type1, cluster1)]
+            source_network_node = int(source_center["center_network_node"])
+            candidates = work_by_source_node.setdefault(source_network_node, [])
 
-                if source_network_node not in distance_cache:
-                    distance_cache[source_network_node] = road.distances_from(source_network_node)
-                road_distance = distance_cache[source_network_node].get(
-                    target_network_node,
-                    float("inf"),
+            for type2, edge_data in outgoing:
+                dag_weight = float(edge_data["weight"])
+                if not np.isfinite(dag_weight) or dag_weight <= 0:
+                    raise ValueError(
+                        f"IO-DAG edge {type1!r}->{type2!r} has non-positive/non-finite weight"
+                    )
+                target_partitions = partitions_by_type[type2]
+                target_positions = _positive_area_overlaps(
+                    source_partition.geometry, target_partitions
+                )
+                for target_position in target_positions:
+                    target_partition = target_partitions.iloc[target_position]
+                    cluster2 = int(target_partition["cluster"])
+                    target_center = center_index[(type2, cluster2)]
+                    target_network_node = int(target_center["center_network_node"])
+                    candidates.append(
+                        (type2, cluster1, cluster2, target_network_node, dag_weight)
+                    )
+
+        source_nodes = [node for node, candidates in work_by_source_node.items() if candidates]
+        source_step = max(1, len(source_nodes) // 10)
+        for source_number, source_network_node in enumerate(source_nodes, start=1):
+            candidates = work_by_source_node[source_network_node]
+            if progress is not None and (
+                source_number == 1
+                or source_number % source_step == 0
+                or source_number == len(source_nodes)
+            ):
+                progress(
+                    f"network X: type {type1!r} source center {source_number:,}/"
+                    f"{len(source_nodes):,}; current X edges={graph.number_of_edges():,}"
                 )
 
+            target_nodes = np.fromiter(
+                (candidate[3] for candidate in candidates), dtype=np.int64, count=len(candidates)
+            )
+            road_distances = road.distances_to_targets(source_network_node, target_nodes)
+            for candidate, road_distance in zip(candidates, road_distances, strict=True):
+                type2, cluster1, cluster2, _, dag_weight = candidate
+                road_distance = float(road_distance)
                 if not np.isfinite(road_distance):
                     diagnostics.append(
                         {
@@ -226,27 +250,27 @@ def instantiate_network(
                 # The requested SIGMA edge definition is multiplicative.  This makes longer
                 # road distance increase edge weight (rather than act as a distance penalty);
                 # the implementation intentionally follows that specification literally.
-                combined_weight = dag_weight * float(road_distance)
+                combined_weight = dag_weight * road_distance
                 graph.add_edge(
                     make_node_id(type1, cluster1),
                     make_node_id(type2, cluster2),
                     dag_weight=dag_weight,
-                    road_distance=float(road_distance),
+                    road_distance=road_distance,
                     weight=combined_weight,
                 )
 
     # Because every cluster edge projects onto one IO-DAG edge, a directed cycle in X would
-    # imply a directed cycle in the type-level DAG.  Treat violation as an implementation
-    # error rather than letting centrality operate on a graph with unexpected semantics.
+    # imply a directed cycle among the corresponding sector types.
     if not nx.is_directed_acyclic_graph(graph):
-        raise RuntimeError("spatial instantiation produced a cycle from an acyclic IO graph")
+        raise RuntimeError("spatial instantiation unexpectedly created a directed cycle")
 
     if progress is not None:
         progress(
             f"network X: complete ({graph.number_of_nodes():,} nodes, "
             f"{graph.number_of_edges():,} edges, {len(diagnostics):,} disconnected overlaps)"
         )
-    return graph, pd.DataFrame(diagnostics, columns=_DIAGNOSTIC_COLUMNS)
+    disconnected = pd.DataFrame(diagnostics, columns=_DIAGNOSTIC_COLUMNS)
+    return graph, disconnected
 
 
 def _positive_weight_support(graph: nx.DiGraph) -> nx.DiGraph:

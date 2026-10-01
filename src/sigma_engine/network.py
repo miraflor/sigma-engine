@@ -554,3 +554,36 @@ class AugmentedNetwork:
         )
         reached = np.flatnonzero(np.isfinite(values))
         return {int(node): float(values[node]) for node in reached}
+
+    def distances_to_targets(
+        self, source: int, targets: np.ndarray | list[int] | tuple[int, ...]
+    ) -> np.ndarray:
+        """Shortest-path distances from one source to requested target nodes only.
+
+        SciPy still computes one bounded-memory single-source distance vector internally,
+        but this method immediately extracts the requested target entries and discards the
+        full vector.  It therefore avoids the large Python dictionaries formerly cached by
+        spatial-network instantiation.
+        """
+        source = int(source)
+        target_array = np.asarray(targets, dtype=np.int64)
+        if target_array.ndim != 1:
+            raise ValueError("targets must be one-dimensional")
+        n = self.sparse_adjacency.shape[0]
+        if not 0 <= source < n:
+            raise ValueError(f"unknown network source node: {source}")
+        if target_array.size == 0:
+            return np.empty(0, dtype=float)
+        if target_array.min() < 0 or target_array.max() >= n:
+            raise ValueError("target list contains an unknown network node")
+
+        out = np.full(target_array.shape, np.inf, dtype=float)
+        same_component = self.sparse_component[target_array] == self.sparse_component[source]
+        if not bool(same_component.any()):
+            return out
+        values = np.asarray(
+            dijkstra(self.sparse_adjacency, directed=True, indices=source),
+            dtype=float,
+        )
+        out[same_component] = values[target_array[same_component]]
+        return out

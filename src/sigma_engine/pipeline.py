@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 import geopandas as gpd
+import networkx as nx
 import numpy as np
 import pandas as pd
 import shapely
@@ -395,6 +396,43 @@ def _write_csv(rows: list[dict[str, object]], columns: list[str], path: Path) ->
     return path
 
 
+def _restore_network_x(
+    node_path: Path, edge_path: Path, disconnected_path: Path
+) -> tuple[nx.DiGraph, pd.DataFrame]:
+    """Restore a completed network-X stage from its durable tabular artifacts."""
+    node_frame = pd.read_csv(
+        node_path,
+        dtype={"node_id": str, "type": str},
+    )
+    edge_frame = pd.read_csv(
+        edge_path,
+        dtype={"node_from": str, "node_to": str},
+    )
+    graph = nx.DiGraph()
+    for row in node_frame.itertuples(index=False):
+        graph.add_node(
+            str(row.node_id),
+            type=str(row.type),
+            cluster=int(row.cluster),
+            center_network_node=int(row.center_network_node),
+            center_x=float(row.center_x),
+            center_y=float(row.center_y),
+        )
+    for row in edge_frame.itertuples(index=False):
+        graph.add_edge(
+            str(row.node_from),
+            str(row.node_to),
+            dag_weight=float(row.dag_weight),
+            road_distance=float(row.road_distance),
+            weight=float(row.weight),
+        )
+    disconnected = pd.read_csv(
+        disconnected_path,
+        dtype={"type1": str, "type2": str},
+    )
+    return graph, disconnected
+
+
 def _crs_linear_unit_name(crs: object) -> str | None:
     """Best-effort human-readable unit name for run metadata."""
     axis_info = getattr(crs, "axis_info", None)
@@ -408,7 +446,7 @@ def _crs_linear_unit_name(crs: object) -> str | None:
 
 _CHECKPOINT_SCHEMA = 1
 _CHECKPOINT_DIRNAME = ".sigma_checkpoints"
-_STAGE_ORDER = ("clustering", "centers", "point_center_distances", "voronoi")
+_STAGE_ORDER = ("clustering", "centers", "point_center_distances", "voronoi", "network_x")
 _STAGE_EVENT_COLUMNS = [
     "stage", "type", "cluster", "status", "action", "attempt",
     "requested_resolution", "used_resolution", "error",
@@ -912,29 +950,62 @@ def run_engine(config: EngineConfig) -> EngineResult:
     )
     report(f"MWAS: artifact written: {io_dag_path.name}")
 
-    report("network X: instantiating spatial overlaps and center distances")
-    network_x, disconnected = instantiate_network(
-        centers, partitions, mwas.graph, augmented, progress=report,
-    )
-    raw_node_rows = [
-        {
-            "node_id": str(node), "type": str(data["type"]), "cluster": int(data["cluster"]),
-            "center_network_node": int(data["center_network_node"]),
-            "center_x": float(data["center_x"]), "center_y": float(data["center_y"]),
-            "eigenvector_centrality": None,
-        }
-        for node, data in sorted(network_x.nodes(data=True), key=lambda item: str(item[0]))
-    ]
-    _write_csv(raw_node_rows, ["node_id", "type", "cluster", "center_network_node", "center_x", "center_y", "eigenvector_centrality"], output_dir / "sigma_X_nodes.csv")
-    raw_edge_rows = [
-        {"node_from": str(source), "node_to": str(target), "dag_weight": float(data["dag_weight"]),
-         "road_distance": float(data["road_distance"]), "weight": float(data["weight"])}
-        for source, target, data in sorted(network_x.edges(data=True), key=lambda edge: (str(edge[0]), str(edge[1])))
-    ]
-    _write_csv(raw_edge_rows, ["node_from", "node_to", "dag_weight", "road_distance", "weight"], output_dir / "sigma_X_edges.csv")
-    if not disconnected.empty:
-        disconnected.sort_values(["type1", "cluster1", "type2", "cluster2"], kind="stable").reset_index(drop=True).to_csv(output_dir / "sigma_disconnected_overlap_pairs.csv", index=False)
-    report("network X: raw node/edge artifacts written")
+    x_nodes_path = output_dir / "sigma_X_nodes.csv"
+    x_edges_path = output_dir / "sigma_X_edges.csv"
+    x_disconnected_path = output_dir / "sigma_disconnected_overlap_pairs.csv"
+    if (
+        _checkpoint_done(checkpoint_state, "network_x", allow_resume=allow_resume)
+        and x_nodes_path.exists()
+        and x_edges_path.exists()
+        and x_disconnected_path.exists()
+    ):
+        report("checkpoint: restoring completed network X stage")
+        network_x, disconnected = _restore_network_x(
+            x_nodes_path, x_edges_path, x_disconnected_path
+        )
+    else:
+        report("network X: instantiating spatial overlaps and center distances")
+        network_x, disconnected = instantiate_network(
+            centers, partitions, mwas.graph, augmented, progress=report,
+        )
+        raw_node_rows = [
+            {
+                "node_id": str(node), "type": str(data["type"]), "cluster": int(data["cluster"]),
+                "center_network_node": int(data["center_network_node"]),
+                "center_x": float(data["center_x"]), "center_y": float(data["center_y"]),
+                "eigenvector_centrality": None,
+            }
+            for node, data in sorted(network_x.nodes(data=True), key=lambda item: str(item[0]))
+        ]
+        _write_csv(
+            raw_node_rows,
+            ["node_id", "type", "cluster", "center_network_node", "center_x", "center_y", "eigenvector_centrality"],
+            x_nodes_path,
+        )
+        raw_edge_rows = [
+            {"node_from": str(source), "node_to": str(target), "dag_weight": float(data["dag_weight"]),
+             "road_distance": float(data["road_distance"]), "weight": float(data["weight"])}
+            for source, target, data in sorted(network_x.edges(data=True), key=lambda edge: (str(edge[0]), str(edge[1])))
+        ]
+        _write_csv(
+            raw_edge_rows,
+            ["node_from", "node_to", "dag_weight", "road_distance", "weight"],
+            x_edges_path,
+        )
+        disconnected_rows = disconnected.to_dict("records") if not disconnected.empty else []
+        _write_csv(
+            disconnected_rows,
+            ["type1", "cluster1", "type2", "cluster2", "status"],
+            x_disconnected_path,
+        )
+        report(
+            f"network X: complete; {network_x.number_of_nodes():,} nodes, "
+            f"{network_x.number_of_edges():,} edges"
+        )
+        report("checkpoint: writing network X artifacts")
+        _mark_checkpoint(checkpoint_manifest_path, checkpoint_state, "network_x", stage_events)
+        _write_stage_csv(stage_events, _STAGE_EVENT_COLUMNS, output_dir / "sigma_stage_events.csv")
+
     report(
         f"centrality: computing directed {config.centrality_direction} eigenvector convention"
     )
