@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sigma-engine"
-version = "0.2.7"
+version = "0.1.0"
 description = "Network-spatial economic centrality engine for SIGMA"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,7 +30,6 @@ sigma-engine = "sigma_engine.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
 
 [tool.setuptools.package-data]
 "sigma_engine.resources" = ["*.csv", "*.txt"]

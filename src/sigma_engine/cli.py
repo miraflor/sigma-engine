@@ -1,4 +1,4 @@
-"""Command-line interface for the focused SIGMA workflow."""
+"""Command-line interface for the revised SIGMA v0.1.0 workflow."""
 
 from __future__ import annotations
 
@@ -7,275 +7,155 @@ from typing import Annotated
 
 import typer
 
-from .pipeline import EngineConfig, run_engine
+from .pipeline import ContinueConfig, EngineConfig, run_engine, run_from_partitions
 
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="Build SIGMA's road-network/spatial economic centrality outputs.",
+    help="SIGMA: network clusters -> medians/partitions -> IO-DAG -> X -> point scores.",
 )
 
 
-@app.callback()
-def _root() -> None:
-    """SIGMA Engine command group.
+def _sheet(value: str) -> str | int:
+    try:
+        return int(value)
+    except ValueError:
+        return value
 
-    Keeping an explicit callback is intentional.  Typer collapses an application that has
-    only one command into a single root command; the callback preserves the documented
-    ``sigma-engine run ...`` interface even while ``run`` is the only public subcommand.
-    """
+
+def _emit_result(result) -> None:
+    typer.echo(f"points scored: {len(result.points):,}")
+    typer.echo(f"clusters / X nodes: {len(result.centers):,}")
+    typer.echo(f"partitions: {len(result.partitions):,}")
+    for name, path in result.output_paths.items():
+        typer.echo(f"{name}: {path}")
 
 
 @app.command()
 def run(
-    roads: Annotated[
-        Path,
-        typer.Option("--roads", help="Projected road line dataset."),
-    ],
-    boundary: Annotated[
-        Path,
-        typer.Option("--boundary", help="Polygon boundary used to render partitions."),
-    ],
-    output_dir: Annotated[
-        Path,
-        typer.Option("--output-dir", help="Directory for final and audit outputs."),
-    ],
-    points: Annotated[
+    points: Annotated[Path, typer.Option("--points", help="Classified point vector/GeoParquet.")],
+    roads: Annotated[Path, typer.Option("--roads", help="Projected road line dataset.")],
+    boundary: Annotated[Path, typer.Option("--boundary", help="Study boundary polygon.")],
+    technical_coefficients: Annotated[
         Path,
         typer.Option(
-            "--points",
-            help=(
-                "Existing classified point vector. Point production is external to "
-                "sigma-engine."
-            ),
+            "--technical-coefficients",
+            help="IO technical-coefficient matrix A. Required; never inferred from Z.",
         ),
     ],
-    io_table_override: Annotated[
+    output_dir: Annotated[Path, typer.Option("--output-dir", help="Output directory.")],
+    transactions: Annotated[
         Path | None,
         typer.Option(
-            "--io-table-override",
-            help=(
-                "Optional custom IO transaction table. Normal runs use the bundled PSA "
-                "2018 IO80/IO16 matrix selected by --classification."
-            ),
+            "--transactions",
+            help="Optional transaction matrix Z override; bundled PSA matrix is default.",
         ),
     ] = None,
     classification: Annotated[
-        str,
-        typer.Option("--classification", help="Economic resolution: io80 (default) or io16."),
+        str, typer.Option("--classification", help="io80 (default) or io16.")
     ] = "io80",
     io80_column: Annotated[
-        str | None,
-        typer.Option(
-            "--io80-column",
-            help="Override IO80 field; default auto-detects io80_code or io80_map_code.",
-        ),
+        str | None, typer.Option("--io80-column", help="Override IO80 classification field.")
     ] = None,
     io16_column: Annotated[
-        str | None,
-        typer.Option(
-            "--io16-column",
-            help="Override IO16 field; default auto-detects io16_code or io16_map_code.",
-        ),
+        str | None, typer.Option("--io16-column", help="Override IO16 classification field.")
     ] = None,
     roads_layer: Annotated[
-        str | None,
-        typer.Option("--roads-layer", help="Layer name for a multi-layer road dataset."),
+        str | None, typer.Option("--roads-layer", help="Road layer for multi-layer input.")
     ] = None,
     boundary_layer: Annotated[
-        str | None,
-        typer.Option("--boundary-layer", help="Layer name for a multi-layer boundary dataset."),
+        str | None, typer.Option("--boundary-layer", help="Boundary layer for multi-layer input.")
     ] = None,
-    io_sheet: Annotated[
+    transactions_sheet: Annotated[
+        str, typer.Option("--transactions-sheet", help="Worksheet name or zero-based index.")
+    ] = "0",
+    technical_coefficients_sheet: Annotated[
         str,
-        typer.Option(
-            "--io-sheet",
-            help=(
-                "Excel sheet for --io-table-override only; name or zero-based numeric index."
-            ),
-        ),
+        typer.Option("--technical-coefficients-sheet", help="Worksheet name or zero-based index."),
     ] = "0",
     mwas_method: Annotated[
         str,
-        typer.Option(
-            "--mwas-method",
-            help=(
-                "IO DAG transformation: fast (default deterministic heuristic) or "
-                "exact (HiGHS MILP; may be much slower)."
-            ),
-        ),
+        typer.Option("--mwas-method", help="fast (default) or exact."),
     ] = "fast",
     min_cluster_size: Annotated[
-        int,
-        typer.Option("--min-cluster-size", help="HDBSCAN minimum cluster size (>=2)."),
+        int, typer.Option("--min-cluster-size", help="Network HDBSCAN minimum cluster size.")
     ] = 5,
     min_samples: Annotated[
-        int | None,
-        typer.Option("--min-samples", help="HDBSCAN min_samples; defaults to min cluster size."),
+        int | None, typer.Option("--min-samples", help="HDBSCAN min_samples; defaults internally.")
     ] = None,
     cluster_selection_method: Annotated[
-        str,
-        typer.Option(
-            "--cluster-selection-method",
-            help="HDBSCAN flat-cluster selection: eom or leaf.",
-        ),
+        str, typer.Option("--cluster-selection-method", help="eom or leaf.")
     ] = "eom",
     allow_single_cluster: Annotated[
-        bool,
-        typer.Option("--allow-single-cluster", help="Allow HDBSCAN to return one cluster."),
+        bool, typer.Option("--allow-single-cluster", help="Allow one HDBSCAN cluster per type.")
     ] = False,
     hdbscan_max_distance: Annotated[
-        float,
-        typer.Option(
-            "--hdbscan-max-distance",
-            help="Maximum sparse road-neighbour search radius; default 5000 road-CRS units.",
-        ),
+        float, typer.Option("--hdbscan-max-distance", help="Maximum road-neighbour radius.")
     ] = 5_000.0,
     hdbscan_distance_mode: Annotated[
-        str,
-        typer.Option(
-            "--hdbscan-distance-mode",
-            help="Sparse HDBSCAN distance search: adaptive (default) or fixed.",
-        ),
+        str, typer.Option("--hdbscan-distance-mode", help="adaptive (default) or fixed.")
     ] = "adaptive",
     hdbscan_min_distance: Annotated[
-        float | None,
-        typer.Option(
-            "--hdbscan-min-distance",
-            help="Optional first search radius in adaptive mode.",
-        ),
+        float | None, typer.Option("--hdbscan-min-distance", help="First adaptive search radius.")
     ] = None,
     hdbscan_max_neighbor_pairs: Annotated[
-        int,
-        typer.Option(
-            "--hdbscan-max-neighbor-pairs",
-            help="Safety cap on stored sparse neighbour pairs.",
-        ),
+        int, typer.Option("--hdbscan-max-neighbor-pairs", help="Sparse pair safety cap.")
     ] = 20_000_000,
     max_snap_distance: Annotated[
-        float | None,
-        typer.Option(
-            "--max-snap-distance",
-            help="Reject points farther than this from roads (road-CRS units).",
-        ),
+        float | None, typer.Option("--max-snap-distance", help="Optional point-to-road QA limit.")
     ] = None,
     vertex_digits: Annotated[
-        int,
-        typer.Option(
-            "--vertex-digits",
-            help="Significant digits used to canonicalize road vertices.",
-        ),
+        int, typer.Option("--vertex-digits", help="Road vertex canonicalization digits.")
     ] = 11,
     voronoi_resolution: Annotated[
         float,
         typer.Option(
             "--voronoi-resolution",
-            help="2-D Voronoi grid resolution in road-CRS units.",
+            help="Initial network-Voronoi surface resolution.",
         ),
     ] = 500.0,
     voronoi_max_cells: Annotated[
-        int,
-        typer.Option(
-            "--voronoi-max-cells",
-            help="Safety cap on candidate Voronoi surface grid cells.",
-        ),
+        int, typer.Option("--voronoi-max-cells", help="Network-Voronoi grid-cell safety cap.")
     ] = 1_000_000,
     voronoi_refine_factor: Annotated[
-        float,
-        typer.Option(
-            "--voronoi-refine-factor",
-            help="Multiply Voronoi resolution by this value when a grid is too coarse.",
-        ),
+        float, typer.Option("--voronoi-refine-factor", help="Resolution multiplier on refinement.")
     ] = 0.5,
     voronoi_max_refinements: Annotated[
-        int,
-        typer.Option(
-            "--voronoi-max-refinements",
-            help=(
-                "Maximum network-Voronoi refinements after the initial attempt; "
-                "default 5 = 6 total attempts before Euclidean fallback."
-            ),
-        ),
+        int, typer.Option("--voronoi-max-refinements", help="Maximum network-only refinements.")
     ] = 5,
-    fail_fast: Annotated[
-        bool,
-        typer.Option(
-            "--fail-fast",
-            help="Abort on the first recoverable per-type/per-cluster error instead of skipping it.",
-        ),
-    ] = False,
     centrality_direction: Annotated[
-        str,
-        typer.Option(
-            "--centrality-direction",
-            help="Directed prestige convention: incoming (default) or outgoing.",
-        ),
+        str, typer.Option("--centrality-direction", help="incoming (default) or outgoing.")
     ] = "incoming",
-    zero_distance_floor: Annotated[
+    distance_tempering: Annotated[
         float,
         typer.Option(
-            "--zero-distance-floor",
-            help="Finite denominator used only when a point is exactly at its center.",
+            "--distance-tempering",
+            help="Point attenuation lambda; default 0.15, bounded by cluster p90.",
         ),
-    ] = 1.0,
+    ] = 0.15,
     progress: Annotated[
-        bool,
-        typer.Option(
-            "--progress/--no-progress",
-            help="Show live timestamped progress for long-running stages.",
-        ),
+        bool, typer.Option("--progress/--no-progress", help="Show stage progress.")
     ] = True,
-    resume: Annotated[
-        bool,
-        typer.Option(
-            "--resume/--no-resume",
-            help="Reuse matching durable stage checkpoints from this output directory.",
-        ),
-    ] = True,
-    restart: Annotated[
-        bool,
-        typer.Option(
-            "--restart",
-            help="Discard prior SIGMA checkpoints/artifacts in the output directory and recompute.",
-        ),
-    ] = False,
 ) -> None:
-    """Run the complete SIGMA engine pipeline."""
-    if classification not in {"io80", "io16"}:
-        raise typer.BadParameter("--classification must be io80 or io16")
-    if cluster_selection_method not in {"eom", "leaf"}:
-        raise typer.BadParameter("--cluster-selection-method must be eom or leaf")
-    if centrality_direction not in {"incoming", "outgoing"}:
-        raise typer.BadParameter("--centrality-direction must be incoming or outgoing")
-    if hdbscan_distance_mode not in {"adaptive", "fixed"}:
-        raise typer.BadParameter("--hdbscan-distance-mode must be adaptive or fixed")
-    if mwas_method not in {"fast", "exact"}:
-        raise typer.BadParameter("--mwas-method must be fast or exact")
-
-    # Typer receives this option as text so users can specify either ``--io-sheet 0`` or a
-    # literal worksheet name.  A purely decimal token is interpreted as a zero-based index.
-    parsed_sheet: str | int
-    try:
-        parsed_sheet = int(io_sheet)
-    except ValueError:
-        parsed_sheet = io_sheet
-
+    """Run the complete revised SIGMA workflow from classified points."""
     config = EngineConfig(
         roads_path=str(roads),
         boundary_path=str(boundary),
-        io_table_override_path=str(io_table_override) if io_table_override else None,
         output_dir=str(output_dir),
         points_path=str(points),
-        classification=classification,  # validated immediately above
+        technical_coefficients_path=str(technical_coefficients),
+        classification=classification,  # validated in pipeline
+        transactions_override_path=str(transactions) if transactions else None,
         io80_column=io80_column,
         io16_column=io16_column,
         roads_layer=roads_layer,
         boundary_layer=boundary_layer,
-        io_sheet=parsed_sheet,
-        mwas_method=mwas_method,  # validated above
+        transactions_sheet=_sheet(transactions_sheet),
+        technical_coefficients_sheet=_sheet(technical_coefficients_sheet),
+        mwas_method=mwas_method,
         min_cluster_size=min_cluster_size,
         min_samples=min_samples,
-        cluster_selection_method=cluster_selection_method,  # validated above
+        cluster_selection_method=cluster_selection_method,
         allow_single_cluster=allow_single_cluster,
         hdbscan_max_distance=hdbscan_max_distance,
         hdbscan_distance_mode=hdbscan_distance_mode,
@@ -287,27 +167,114 @@ def run(
         voronoi_max_cells=voronoi_max_cells,
         voronoi_refine_factor=voronoi_refine_factor,
         voronoi_max_refinements=voronoi_max_refinements,
-        fail_fast=fail_fast,
-        centrality_direction=centrality_direction,  # validated above
-        zero_distance_floor=zero_distance_floor,
+        centrality_direction=centrality_direction,
+        distance_tempering=distance_tempering,
         progress=progress,
-        resume=resume,
-        restart=restart,
     )
-
     try:
         result = run_engine(config)
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+    _emit_result(result)
 
-    typer.echo(f"retained points: {len(result.points):,}")
-    typer.echo(f"clusters: {len(result.centers):,}")
-    typer.echo(f"partitions: {len(result.partitions):,}")
-    for name, path in result.output_paths.items():
-        typer.echo(f"{name}: {path}")
+
+@app.command("from-partitions")
+def from_partitions(
+    partitions: Annotated[
+        Path,
+        typer.Option(
+            "--partitions",
+            help="Existing sigma_partitions.parquet from Step 4.",
+        ),
+    ],
+    roads: Annotated[Path, typer.Option("--roads", help="Same projected road dataset.")],
+    technical_coefficients: Annotated[
+        Path,
+        typer.Option("--technical-coefficients", help="IO technical-coefficient matrix A."),
+    ],
+    output_dir: Annotated[
+        Path, typer.Option("--output-dir", help="Output directory for Steps 5-7.")
+    ],
+    centers: Annotated[
+        Path | None,
+        typer.Option(
+            "--centers",
+            help="Step-3 centers; defaults to sigma_network_centers.parquet beside partitions.",
+        ),
+    ] = None,
+    points_with_center_distance: Annotated[
+        Path | None,
+        typer.Option(
+            "--points-with-center-distance",
+            help=(
+                "Step-3 point-distance artifact; defaults to "
+                "sigma_points_with_center_distance.parquet beside partitions."
+            ),
+        ),
+    ] = None,
+    transactions: Annotated[
+        Path | None,
+        typer.Option("--transactions", help="Optional transaction matrix Z override."),
+    ] = None,
+    classification: Annotated[
+        str, typer.Option("--classification", help="io80 (default) or io16.")
+    ] = "io80",
+    roads_layer: Annotated[
+        str | None, typer.Option("--roads-layer", help="Road layer for multi-layer input.")
+    ] = None,
+    transactions_sheet: Annotated[
+        str, typer.Option("--transactions-sheet", help="Worksheet name or zero-based index.")
+    ] = "0",
+    technical_coefficients_sheet: Annotated[
+        str,
+        typer.Option("--technical-coefficients-sheet", help="Worksheet name or zero-based index."),
+    ] = "0",
+    mwas_method: Annotated[
+        str, typer.Option("--mwas-method", help="fast (default) or exact.")
+    ] = "fast",
+    vertex_digits: Annotated[
+        int, typer.Option("--vertex-digits", help="Road vertex canonicalization digits.")
+    ] = 11,
+    centrality_direction: Annotated[
+        str, typer.Option("--centrality-direction", help="incoming (default) or outgoing.")
+    ] = "incoming",
+    distance_tempering: Annotated[
+        float,
+        typer.Option("--distance-tempering", help="Point attenuation lambda; default 0.15."),
+    ] = 0.15,
+    progress: Annotated[
+        bool, typer.Option("--progress/--no-progress", help="Show stage progress.")
+    ] = True,
+) -> None:
+    """Run only Steps 5--7 from existing Voronoi/median artifacts."""
+    config = ContinueConfig(
+        roads_path=str(roads),
+        partitions_path=str(partitions),
+        technical_coefficients_path=str(technical_coefficients),
+        output_dir=str(output_dir),
+        centers_path=str(centers) if centers else None,
+        points_with_center_distance_path=(
+            str(points_with_center_distance) if points_with_center_distance else None
+        ),
+        classification=classification,
+        transactions_override_path=str(transactions) if transactions else None,
+        roads_layer=roads_layer,
+        transactions_sheet=_sheet(transactions_sheet),
+        technical_coefficients_sheet=_sheet(technical_coefficients_sheet),
+        mwas_method=mwas_method,
+        vertex_digits=vertex_digits,
+        centrality_direction=centrality_direction,
+        distance_tempering=distance_tempering,
+        progress=progress,
+    )
+    try:
+        result = run_from_partitions(config)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    _emit_result(result)
 
 
 def main() -> None:
-    """Console-script entry point."""
     app()

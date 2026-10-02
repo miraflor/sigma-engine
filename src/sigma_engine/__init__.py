@@ -1,6 +1,13 @@
 """SIGMA engine public API."""
 
 from ._version import __version__
-from .pipeline import EngineConfig, EngineResult, run_engine
+from .pipeline import ContinueConfig, EngineConfig, EngineResult, run_engine, run_from_partitions
 
-__all__ = ["EngineConfig", "EngineResult", "run_engine"]
+__all__ = [
+    "__version__",
+    "EngineConfig",
+    "ContinueConfig",
+    "EngineResult",
+    "run_engine",
+    "run_from_partitions",
+]

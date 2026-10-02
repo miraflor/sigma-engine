@@ -1,26 +1,41 @@
-SIGMA Engine 0.2.7 Fast-MWAS-default overlay
+SIGMA revised-workflow overlay
+==============================
 
-Baseline
---------
-Apply this overlay directly to the authoritative sigma-engine 0.2.6 tree supplied on
-2026-10-01 after the Voronoi regression-test correction. Extract/copy it into the
-repository root and allow replacement of matching files.
+Baseline inspected:
+  miraflor/sigma-engine main
+  b02185c2f2e821348e1b03bbcf2cb3640e0588e0
 
-Main change
------------
-- Restricted Gradient Extraction (RGE) is removed.
-- Maximum-weight acyclic subgraph (MWAS) is restored.
-- Fast deterministic descending-weight cycle-avoidance MWAS is the default.
-- Exact zero-gap SciPy/HiGHS MILP MWAS remains available with --mwas-method exact.
-- Fast mode is explicitly reported as heuristic/non-optimal; exact mode must prove an optimum.
-- sigma_io_dag.csv is written immediately after the IO-DAG stage.
-- Existing clustering, center, distance, Voronoi fallback, checkpoint, and provenance annotations remain.
+Apply by copying the CONTENTS of this overlay onto the repository root, preserving
+paths and overwriting same-named files.
 
-Verification
-------------
-    python -m pip install -e ".[dev]"
-    python -m compileall -q src tests
-    python -m pytest -q
-    python -c "import sigma_engine; print(sigma_engine.__version__)"
+This overlay intentionally does NOT contain the existing unchanged spatial modules
+or packaged IO resources. They remain in your repository.
 
-Expected version: 0.2.7
+After applying:
+
+  python -m pip install -e ".[dev]"
+  python -m compileall -q src tests
+  python -m pytest -q
+  python -m sigma_engine --help
+  python -m sigma_engine from-partitions --help
+
+The old root files APPLY_AUGMENTED_ROAD_CHECKPOINT.txt and APPLY_XFIX.txt are stale
+for the reset and may be deleted. They do not affect runtime.
+
+To test immediately from existing Step-3/4 outputs, see README.md under
+"Continue immediately from existing partitions".
+
+Correction note (r2)
+--------------------
+The acceptance gate must be run as one fail-fast PowerShell script, not pasted as a sequence
+of interactive commands. The full baseline repository is not Ruff-clean; lint only the
+overlay-owned files listed in docs/TESTING.md, and use the full pytest suite as the
+repository-wide behavioral gate.
+
+Correction note (r4)
+--------------------
+This package supersedes r2/r3. Apply it over the current uncommitted overlay state
+and run the separately supplied fail-fast verifier `apply_sigma_engine_r4.ps1`.
+The verifier uses the installed Ruff version to normalize import sorting (`I` rules)
+first, then reruns the complete overlay-owned Ruff gate with fixes disabled before
+running the full pytest suite. No workflow behavior is changed by that normalization.

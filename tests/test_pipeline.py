@@ -1,346 +1,129 @@
-import json
+from types import SimpleNamespace
 
 import geopandas as gpd
 import numpy as np
-import pandas as pd
 import pytest
-from shapely.geometry import LineString, Point, box
+from shapely.geometry import Point, box
 
-from sigma_engine.pipeline import EngineConfig, run_engine
+from sigma_engine.pipeline import (
+    _assert_cluster_invariant,
+    _normalize_restart_points,
+    _public_clustered,
+)
 
-pytest.importorskip("pyarrow")
+
+def test_cluster_key_invariant_requires_exact_match():
+    points = gpd.GeoDataFrame(
+        {"type": ["A", "B"], "cluster": [0, 0], "distance_to_cluster_median": [1.0, 2.0]},
+        geometry=[Point(0, 0), Point(1, 0)],
+        crs="EPSG:3857",
+    )
+    centers = gpd.GeoDataFrame(
+        {"type": ["A", "B"], "cluster": [0, 0], "center_network_node": [1, 2]},
+        geometry=[Point(0, 0), Point(1, 0)],
+        crs=points.crs,
+    )
+    partitions = gpd.GeoDataFrame(
+        {"type": ["A", "B"], "cluster": [0, 0]},
+        geometry=[box(-1, -1, 1, 1), box(0, -1, 2, 1)],
+        crs=points.crs,
+    )
+    assert _assert_cluster_invariant(points, centers, partitions) == 2
+
+    bad = partitions.iloc[:1].copy()
+    with pytest.raises(RuntimeError, match="cluster-count/key invariant"):
+        _assert_cluster_invariant(points, centers, bad)
 
 
-@pytest.mark.parametrize("classification_column", ["io80_code", "io80_map_code"])
-def test_end_to_end(tmp_path, classification_column):
-    crs = "EPSG:3857"
-    roads_path = tmp_path / "roads.gpkg"
-    boundary_path = tmp_path / "boundary.gpkg"
-    points_path = tmp_path / "points.parquet"
-    io_path = tmp_path / "io.csv"
-    out = tmp_path / "out"
-
-    roads = gpd.GeoDataFrame(geometry=[LineString([(0, 0), (100, 0)])], crs=crs)
-    roads.to_file(roads_path, driver="GPKG")
-    gpd.GeoDataFrame(geometry=[box(0, -10, 100, 10)], crs=crs).to_file(boundary_path, driver="GPKG")
-
-    xs = [5, 6, 7, 8, 9, 40, 41, 42, 43, 44, 60, 61, 62, 63, 64, 90, 91, 92, 93, 94]
-    types = ["01"] * 10 + ["02"] * 10
-    pts = gpd.GeoDataFrame(
+def test_restart_accepts_legacy_distance_field_only_as_input_alias():
+    old = gpd.GeoDataFrame(
         {
-            "canonical_id": [f"p{i}" for i in range(20)],
-            "canonical_name": [f"P{i}" for i in range(20)],
-            classification_column: types,
+            "canonical_id": ["p1"],
+            "type": ["A"],
+            "cluster": [0],
+            "network_distance_to_center": [12.5],
+            "point_center_distance_method": ["network_shortest_path"],
         },
-        geometry=[Point(x, 0) for x in xs],
-        crs=crs,
+        geometry=[Point(0, 0)],
+        crs="EPSG:3857",
     )
-    pts.to_parquet(points_path)
-
-    sectors = [f"{i:02d}" for i in range(1, 81)]
-    io = pd.DataFrame(0.0, index=sectors, columns=sectors)
-    io.loc["01", "02"] = 10.0
-    io.loc["02", "01"] = 1.0
-    io.to_csv(io_path)
-
-    result = run_engine(
-        EngineConfig(
-            roads_path=str(roads_path),
-            boundary_path=str(boundary_path),
-            io_table_override_path=str(io_path),
-            points_path=str(points_path),
-            output_dir=str(out),
-            min_cluster_size=3,
-            min_samples=2,
-            allow_single_cluster=True,
-            voronoi_resolution=5,
-        )
-    )
-    assert set(["canonical_id", "canonical_name", "type", "centrality_score", "geometry"]).issubset(
-        result.points.columns
-    )
-    assert result.points.centrality_score.notna().all()
-    assert result.metadata["eigenvector_degenerate_dag"] is True
-    assert gpd.read_parquet(out / "sigma_points_centrality.parquet").crs is not None
-    metadata = json.loads((out / "sigma_run_metadata.json").read_text())
-    assert metadata["classification"] == "io80"
-    assert metadata["point_classification_column"] == classification_column
-    summary = pd.read_csv(out / "sigma_clustering_summary.csv")
-    trace = pd.read_csv(out / "sigma_clustering_distance_trace.csv")
-    assert set(summary["type"].astype(str)) == {"1", "2"} or set(summary["type"].astype(str)) == {"01", "02"}
-    assert {"distance_status", "max_distance", "n_pairs"}.issubset(summary.columns)
-    assert len(trace) >= 2
-    assert metadata["hdbscan_clustering_summary_file"] == "sigma_clustering_summary.csv"
-    assert metadata["hdbscan_distance_trace_file"] == "sigma_clustering_distance_trace.csv"
-    assert metadata["mwas_requested_mode"] == "fast"
-    assert metadata["mwas_method"] == "fast_greedy"
-    assert metadata["mwas_exact"] is False
-    assert metadata["mwas_optimal"] is False
-    assert metadata["io_dag_edge_count"] >= 1
-    assert metadata["io_dag_weight"] + metadata["io_removed_weight"] == pytest.approx(
-        metadata["io_total_weight_source"]
-    )
-    dag = pd.read_csv(out / "sigma_io_dag.csv")
-    assert {"type_from", "type_to", "io_weight"}.issubset(dag.columns)
-    assert set(result.output_paths) >= {
-        "clustering_summary", "clustering_distance_trace", "io_dag"
-    }
+    new = _normalize_restart_points(old)
+    assert new.loc[0, "distance_to_cluster_median"] == 12.5
 
 
-def test_end_to_end_skips_failed_voronoi_type_without_aborting(tmp_path, monkeypatch):
-    import sigma_engine.voronoi as voronoi_module
+def test_restart_filters_only_legacy_extra_point_clusters():
+    from sigma_engine.pipeline import _align_legacy_restart_points
 
-    crs = "EPSG:3857"
-    roads_path = tmp_path / "roads.gpkg"
-    boundary_path = tmp_path / "boundary.gpkg"
-    points_path = tmp_path / "points.parquet"
-    io_path = tmp_path / "io.csv"
-    out = tmp_path / "out"
-
-    roads = gpd.GeoDataFrame(geometry=[LineString([(0, 0), (100, 0)])], crs=crs)
-    roads.to_file(roads_path, driver="GPKG")
-    gpd.GeoDataFrame(geometry=[box(0, -10, 100, 10)], crs=crs).to_file(boundary_path, driver="GPKG")
-
-    xs = [5, 6, 7, 8, 9, 40, 41, 42, 43, 44, 60, 61, 62, 63, 64, 90, 91, 92, 93, 94]
-    types = ["01"] * 10 + ["02"] * 10
-    gpd.GeoDataFrame(
+    points = gpd.GeoDataFrame(
         {
-            "canonical_id": [f"p{i}" for i in range(20)],
-            "canonical_name": [f"P{i}" for i in range(20)],
-            "io80_code": types,
+            "type": ["A", "B", "C"],
+            "cluster": [0, 0, 0],
+            "distance_to_cluster_median": [1.0, 2.0, 3.0],
         },
-        geometry=[Point(x, 0) for x in xs],
-        crs=crs,
-    ).to_parquet(points_path)
-
-    sectors = [f"{i:02d}" for i in range(1, 81)]
-    io = pd.DataFrame(0.0, index=sectors, columns=sectors)
-    io.loc["01", "02"] = 10.0
-    io.to_csv(io_path)
-
-    original = voronoi_module.surface_partition_for_type
-
-    def fail_type_01(network, type_points, *args, **kwargs):
-        if str(type_points["type"].iloc[0]) == "01":
-            raise RuntimeError("synthetic unrecoverable type surface failure")
-        return original(network, type_points, *args, **kwargs)
-
-    monkeypatch.setattr(voronoi_module, "surface_partition_for_type", fail_type_01)
-
-    result = run_engine(
-        EngineConfig(
-            roads_path=str(roads_path),
-            boundary_path=str(boundary_path),
-            io_table_override_path=str(io_path),
-            points_path=str(points_path),
-            output_dir=str(out),
-            min_cluster_size=3,
-            min_samples=2,
-            allow_single_cluster=True,
-            voronoi_resolution=5,
-            fail_fast=False,
-        )
+        geometry=[Point(0, 0), Point(1, 0), Point(2, 0)],
+        crs="EPSG:3857",
     )
-
-    # Network Voronoi failure for type 01 should be recovered by the
-    # Euclidean Voronoi fallback rather than dropping the type.
-    assert set(result.points["type"]) == {"01", "02"}
-    assert set(result.centers["type"]) == {"01", "02"}
-    assert set(result.partitions["type"]) == {"01", "02"}
-
-    methods = (
-        result.partitions.assign(type=result.partitions["type"].astype(str).str.zfill(2))
-        .groupby("type")["surface_method"]
-        .first()
-        .to_dict()
+    centers = gpd.GeoDataFrame(
+        {"type": ["A", "B"], "cluster": [0, 0], "center_network_node": [1, 2]},
+        geometry=[Point(0, 0), Point(1, 0)],
+        crs=points.crs,
     )
-    assert methods["01"] == "euclidean_voronoi_fallback"
-    assert methods["02"] == "network_voronoi"
-
-    events = pd.read_csv(out / "sigma_stage_events.csv", dtype={"type": str})
-    recovered = events.loc[
-        (events["stage"] == "voronoi")
-        & (events["status"] == "recovered")
-        & (events["action"] == "fallback_euclidean_voronoi")
-    ]
-    assert set(recovered["type"].astype(str).str.zfill(2)) == {"01"}
-    assert result.metadata["recoverable_stage_recovered_count"] >= 1
-    assert result.metadata["recoverable_stage_skipped_count"] == 0
-    assert result.metadata["point_count_dropped_recoverable_failures"] == 0
-
-
-def _checkpoint_fixture(tmp_path):
-    crs = "EPSG:3857"
-    roads_path = tmp_path / "roads_cp.gpkg"
-    boundary_path = tmp_path / "boundary_cp.gpkg"
-    points_path = tmp_path / "points_cp.parquet"
-    io_path = tmp_path / "io_cp.csv"
-    out = tmp_path / "out_cp"
-
-    gpd.GeoDataFrame(geometry=[LineString([(0, 0), (100, 0)])], crs=crs).to_file(
-        roads_path, driver="GPKG"
+    partitions = gpd.GeoDataFrame(
+        {"type": ["A", "B"], "cluster": [0, 0]},
+        geometry=[box(-1, -1, 1, 1), box(0, -1, 2, 1)],
+        crs=points.crs,
     )
-    gpd.GeoDataFrame(geometry=[box(0, -10, 100, 10)], crs=crs).to_file(
-        boundary_path, driver="GPKG"
-    )
-    xs = [5, 6, 7, 8, 9, 40, 41, 42, 43, 44, 60, 61, 62, 63, 64, 90, 91, 92, 93, 94]
-    types = ["01"] * 10 + ["02"] * 10
-    gpd.GeoDataFrame(
+    aligned, dropped = _align_legacy_restart_points(points, centers, partitions)
+    assert dropped == 1
+    assert set(aligned["type"]) == {"A", "B"}
+
+
+def test_restart_rejects_legacy_euclidean_distance_fallback():
+    old = gpd.GeoDataFrame(
         {
-            "canonical_id": [f"cp{i}" for i in range(20)],
-            "canonical_name": [f"CP{i}" for i in range(20)],
-            "io80_code": types,
+            "canonical_id": ["p1"],
+            "type": ["A"],
+            "cluster": [0],
+            "network_distance_to_center": [12.5],
+            "point_center_distance_method": ["euclidean_fallback"],
         },
-        geometry=[Point(x, 0) for x in xs],
-        crs=crs,
-    ).to_parquet(points_path)
-    sectors = [f"{i:02d}" for i in range(1, 81)]
-    io = pd.DataFrame(0.0, index=sectors, columns=sectors)
-    io.loc["01", "02"] = 10.0
-    io.to_csv(io_path)
-    return EngineConfig(
-        roads_path=str(roads_path),
-        boundary_path=str(boundary_path),
-        io_table_override_path=str(io_path),
-        points_path=str(points_path),
-        output_dir=str(out),
-        min_cluster_size=3,
-        min_samples=2,
-        allow_single_cluster=True,
-        voronoi_resolution=5,
-    ), out
+        geometry=[Point(0, 0)],
+        crs="EPSG:3857",
+    )
+    with pytest.raises(ValueError, match="non-network distance method"):
+        _normalize_restart_points(old)
 
 
-def test_resume_after_crash_does_not_repeat_clustering(tmp_path, monkeypatch):
-    import sigma_engine.pipeline as pipeline_module
-
-    config, out = _checkpoint_fixture(tmp_path)
-    original_center = pipeline_module.cluster_centers
-    original_cluster = pipeline_module.cluster_by_type
-
-    def crash_after_clustering(*args, **kwargs):
-        raise RuntimeError("synthetic crash after clustering")
-
-    monkeypatch.setattr(pipeline_module, "cluster_centers", crash_after_clustering)
-    with pytest.raises(RuntimeError, match="synthetic crash"):
-        run_engine(config)
-
-    assert (out / "sigma_clustered_points.parquet").exists()
-    assert (out / "sigma_clustering_summary.csv").exists()
-    manifest = json.loads((out / ".sigma_checkpoints" / "manifest.json").read_text())
-    assert "clustering" in manifest["completed_stages"]
-    assert "centers" not in manifest["completed_stages"]
-
-    monkeypatch.setattr(pipeline_module, "cluster_centers", original_center)
-
-    def clustering_must_not_run(*args, **kwargs):
-        raise AssertionError("clustering was recomputed instead of resumed")
-
-    monkeypatch.setattr(pipeline_module, "cluster_by_type", clustering_must_not_run)
-    result = run_engine(config)
-    assert len(result.points) > 0
-    assert (out / "sigma_network_centers.parquet").exists()
-    assert (out / "sigma_points_with_center_distance.parquet").exists()
-    assert (out / "sigma_partitions.parquet").exists()
-    assert (out / "sigma_points_partitioned.parquet").exists()
-    assert (out / "sigma_io_dag.csv").exists()
-    assert (out / "sigma_X_nodes.csv").exists()
-    assert (out / "sigma_X_edges.csv").exists()
+def test_restart_rejects_duplicate_point_identifiers():
+    saved = gpd.GeoDataFrame(
+        {
+            "point_id": ["p1", "p1"],
+            "type": ["A", "A"],
+            "cluster": [0, 0],
+            "distance_to_cluster_median": [1.0, 2.0],
+        },
+        geometry=[Point(0, 0), Point(1, 0)],
+        crs="EPSG:3857",
+    )
+    with pytest.raises(ValueError, match="point_id must be non-blank and unique"):
+        _normalize_restart_points(saved)
 
 
-def test_resume_after_center_checkpoint_skips_median_solver(tmp_path, monkeypatch):
-    import sigma_engine.pipeline as pipeline_module
-
-    config, out = _checkpoint_fixture(tmp_path)
-    original_distance = pipeline_module._attach_center_distances
-    original_center = pipeline_module.cluster_centers
-
-    def crash_after_centers(*args, **kwargs):
-        raise RuntimeError("synthetic crash after centers")
-
-    monkeypatch.setattr(pipeline_module, "_attach_center_distances", crash_after_centers)
-    with pytest.raises(RuntimeError, match="synthetic crash"):
-        run_engine(config)
-    assert (out / "sigma_network_centers.parquet").exists()
-    manifest = json.loads((out / ".sigma_checkpoints" / "manifest.json").read_text())
-    assert "centers" in manifest["completed_stages"]
-
-    monkeypatch.setattr(pipeline_module, "_attach_center_distances", original_distance)
-
-    def centers_must_not_run(*args, **kwargs):
-        raise AssertionError("1-median stage was recomputed instead of resumed")
-
-    monkeypatch.setattr(pipeline_module, "cluster_centers", centers_must_not_run)
-    result = run_engine(config)
-    assert len(result.centers) > 0
-
-
-def test_restart_invalidates_checkpoint(tmp_path, monkeypatch):
-    import sigma_engine.pipeline as pipeline_module
-
-    config, out = _checkpoint_fixture(tmp_path)
-    run_engine(config)
-    called = {"cluster": 0}
-    original_cluster = pipeline_module.cluster_by_type
-
-    def counted(*args, **kwargs):
-        called["cluster"] += 1
-        return original_cluster(*args, **kwargs)
-
-    monkeypatch.setattr(pipeline_module, "cluster_by_type", counted)
-    run_engine(EngineConfig(**{**config.__dict__, "restart": True}))
-    assert called["cluster"] == 1
-    manifest = json.loads((out / ".sigma_checkpoints" / "manifest.json").read_text())
-    assert manifest["final_output_complete"] is True
-
-
-def test_resume_restores_augmented_road_graph_without_reaugmentation(tmp_path, monkeypatch):
-    import sigma_engine.pipeline as pipeline_module
-
-    config, out = _checkpoint_fixture(tmp_path)
-    first = run_engine(config)
-    assert len(first.points) > 0
-
-    checkpoint_dir = out / ".sigma_checkpoints"
-    manifest = json.loads((checkpoint_dir / "manifest.json").read_text())
-    assert "augmented_roads" in manifest["completed_stages"]
-    assert (checkpoint_dir / "augmented_road_nodes.parquet").exists()
-    assert (checkpoint_dir / "augmented_road_edges.parquet").exists()
-    assert (checkpoint_dir / "augmented_road_point_node.npy").exists()
-    assert (checkpoint_dir / "augmented_road_source_pos.npy").exists()
-
-    def augmentation_must_not_run(*args, **kwargs):
-        raise AssertionError("augmented road graph was recomputed instead of resumed")
-
-    monkeypatch.setattr(pipeline_module.RoadNetwork, "augment", augmentation_must_not_run)
-    resumed = run_engine(config)
-    assert len(resumed.points) == len(first.points)
-
-
-def test_misaligned_augmented_road_checkpoint_is_rebuilt(tmp_path, monkeypatch):
-    import sigma_engine.pipeline as pipeline_module
-
-    config, out = _checkpoint_fixture(tmp_path)
-    run_engine(config)
-    checkpoint_dir = out / ".sigma_checkpoints"
-    source_pos_path = checkpoint_dir / "augmented_road_source_pos.npy"
-    with source_pos_path.open("wb") as handle:
-        np.save(handle, np.asarray([999], dtype=np.int64), allow_pickle=False)
-
-    original_augment = pipeline_module.RoadNetwork.augment
-    calls = {"augment": 0}
-
-    def counted_augment(self, *args, **kwargs):
-        calls["augment"] += 1
-        return original_augment(self, *args, **kwargs)
-
-    monkeypatch.setattr(pipeline_module.RoadNetwork, "augment", counted_augment)
-    result = run_engine(config)
-    assert len(result.points) > 0
-    assert calls["augment"] == 1
-
-    with source_pos_path.open("rb") as handle:
-        restored_source_pos = np.load(handle, allow_pickle=False)
-    assert restored_source_pos.ndim == 1
-    assert len(restored_source_pos) > 1
-    assert not np.array_equal(restored_source_pos, np.asarray([999], dtype=np.int64))
+def test_public_clustered_includes_step1_network_position():
+    clustered = gpd.GeoDataFrame(
+        {
+            "canonical_id": ["p1", "p2"],
+            "type": ["01", "01"],
+            "cluster": [0, -1],
+        },
+        geometry=[Point(0, 0), Point(1, 0)],
+        crs="EPSG:3857",
+    )
+    snaps = SimpleNamespace(
+        snapped_xy=np.asarray([[0.2, 0.0], [0.8, 0.0]], dtype=float),
+        snap_distance=np.asarray([0.2, 0.2], dtype=float),
+    )
+    out = _public_clustered(clustered, SimpleNamespace(snaps=snaps))
+    assert out["point_id"].tolist() == ["p1", "p2"]
+    assert out["snap_distance"].tolist() == [0.2, 0.2]
+    assert [geometry.x for geometry in out["network_position"]] == [0.2, 0.8]

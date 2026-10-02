@@ -1,80 +1,100 @@
 from types import SimpleNamespace
 
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from sigma_engine.cli import app
 
 
-def test_cli_keeps_explicit_run_subcommand():
+def _result():
+    return SimpleNamespace(points=[], centers=[], partitions=[], output_paths={})
+
+
+def test_cli_exposes_full_and_restart_commands():
     runner = CliRunner()
     root = runner.invoke(app, ["--help"])
     assert root.exit_code == 0
     assert "run" in root.stdout
+    assert "from-partitions" in root.stdout
 
-    command = runner.invoke(app, ["run", "--help"])
-    assert command.exit_code == 0
-    assert "--points" in command.stdout
-    assert "--roads" in command.stdout
-    assert "--io-table-override" in command.stdout
-    assert "--resume" in command.stdout
-    assert "--no-resume" in command.stdout
-    assert "--restart" in command.stdout
-    assert "--mwas-method" in command.stdout
-    assert "--area" not in command.stdout
-    assert "--siphon" not in command.stdout
+    full = runner.invoke(app, ["run", "--help"])
+    assert full.exit_code == 0
+    restart = runner.invoke(app, ["from-partitions", "--help"])
+    assert restart.exit_code == 0
+
+    # Inspect Click's option declarations instead of Rich-rendered help text.  Typer can
+    # wrap long option names differently depending on terminal width and version.
+    root_command = get_command(app)
+    run_options = {
+        option
+        for parameter in root_command.commands["run"].params
+        for option in getattr(parameter, "opts", [])
+    }
+    restart_options = {
+        option
+        for parameter in root_command.commands["from-partitions"].params
+        for option in getattr(parameter, "opts", [])
+    }
+    assert {
+        "--technical-coefficients",
+        "--transactions",
+        "--mwas-method",
+        "--distance-tempering",
+    } <= run_options
+    assert {
+        "--partitions",
+        "--centers",
+        "--points-with-center-distance",
+    } <= restart_options
 
 
-def test_cli_passes_existing_points_without_any_producer_options(monkeypatch):
+def test_cli_fast_mwas_and_tempering_are_defaults(monkeypatch):
     captured = []
 
-    def fake_run_engine(config):
+    def fake(config):
         captured.append(config)
-        return SimpleNamespace(points=[], centers=[], partitions=[], output_paths={})
+        return _result()
 
-    monkeypatch.setattr("sigma_engine.cli.run_engine", fake_run_engine)
+    monkeypatch.setattr("sigma_engine.cli.run_engine", fake)
     runner = CliRunner()
     result = runner.invoke(
         app,
         [
             "run",
-            "--points",
-            "pois.parquet",
-            "--roads",
-            "roads.gpkg",
-            "--boundary",
-            "boundary.gpkg",
-            "--output-dir",
-            "output",
-        ],
-    )
-
-    assert result.exit_code == 0, result.stdout
-    assert captured[-1].points_path == "pois.parquet"
-    assert captured[-1].io80_column is None
-    assert captured[-1].io16_column is None
-    assert captured[-1].io_table_override_path is None
-    assert captured[-1].mwas_method == "fast"
-
-
-def test_cli_allows_explicit_exact_mwas(monkeypatch):
-    captured = []
-
-    def fake_run_engine(config):
-        captured.append(config)
-        return SimpleNamespace(points=[], centers=[], partitions=[], output_paths={})
-
-    monkeypatch.setattr("sigma_engine.cli.run_engine", fake_run_engine)
-    runner = CliRunner()
-    result = runner.invoke(
-        app,
-        [
-            "run",
-            "--points", "pois.parquet",
+            "--points", "points.parquet",
             "--roads", "roads.gpkg",
             "--boundary", "boundary.gpkg",
-            "--output-dir", "output",
-            "--mwas-method", "exact",
+            "--technical-coefficients", "A.xlsx",
+            "--output-dir", "out",
         ],
     )
     assert result.exit_code == 0, result.stdout
-    assert captured[-1].mwas_method == "exact"
+    assert captured[-1].classification == "io80"
+    assert captured[-1].mwas_method == "fast"
+    assert captured[-1].distance_tempering == 0.15
+    assert captured[-1].transactions_override_path is None
+
+
+def test_from_partitions_passes_restart_artifacts(monkeypatch):
+    captured = []
+
+    def fake(config):
+        captured.append(config)
+        return _result()
+
+    monkeypatch.setattr("sigma_engine.cli.run_from_partitions", fake)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "from-partitions",
+            "--partitions", "sigma_partitions.parquet",
+            "--roads", "roads.gpkg",
+            "--technical-coefficients", "A.xlsx",
+            "--output-dir", "out",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert captured[-1].centers_path is None
+    assert captured[-1].points_with_center_distance_path is None
+    assert captured[-1].mwas_method == "fast"
