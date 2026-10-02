@@ -41,3 +41,11 @@
 - Record the built-in gross-output resource hash in run metadata.
 - Preserve full-workbook Total Output extraction for custom transaction overrides.
 - Add regression tests proving that no external economic file is required and that intermediate column sums are never used as gross output.
+
+## Centrality correction r7b
+
+- Preserve directed X edges for audit, but remove directionality before eigenvector centrality.
+- Compute weighted eigenvector centrality on the positive-weight undirected projection of X.
+- Keep the legacy centrality-direction option temporarily for compatibility; it no longer changes the result.
+- Mark run metadata as `undirected_weighted_eigenvector` / `undirected`.
+- Remove the DAG terminal-node fallback that concentrated centrality on sinks.

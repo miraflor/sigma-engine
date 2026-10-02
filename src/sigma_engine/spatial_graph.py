@@ -1,4 +1,4 @@
-"""Spatial instantiation of the MWAS IO DAG and directed centrality on ``X``.
+"""Spatial instantiation of the MWAS IO DAG and centrality support for ``X``.
 
 The economic DAG supplied here is the acyclic subgraph selected from the weighted
 IO network by SIGMA's MWAS stage.  This module does not alter its sector-level
@@ -21,7 +21,6 @@ import shapely
 
 from .network import AugmentedNetwork
 
-
 _DIAGNOSTIC_COLUMNS = ["type1", "cluster1", "type2", "cluster2", "status"]
 
 
@@ -37,7 +36,7 @@ def make_node_id(type_value: str, cluster: int) -> str:
 
 @dataclass(frozen=True)
 class CentralityResult:
-    """Directed weighted eigenvector-centrality result plus interpretation metadata."""
+    """Weighted eigenvector-centrality result plus interpretation metadata."""
 
     values: dict[str, float]
     direction: str
@@ -273,14 +272,14 @@ def instantiate_network(
     return graph, disconnected
 
 
-def _positive_weight_support(graph: nx.DiGraph) -> nx.DiGraph:
-    """Return the adjacency support that actually contributes to weighted centrality.
+def _positive_weight_support(graph: nx.DiGraph) -> nx.Graph:
+    """Return the positive-weight undirected projection used for centrality.
 
-    A spatial edge can have weight zero when two network medians occupy the same road node.
-    Such an edge is present for auditability but contributes a zero adjacency entry.  It must
-    therefore not change which nodes form the kernel of a DAG adjacency matrix.
+    Directed X remains unchanged for audit. For eigenvector centrality only, every positive
+    directed edge ``u -> v`` becomes an undirected edge ``{u, v}``. If both directions are
+    ever present, their weights are summed. Zero-weight edges remain audit-only.
     """
-    support = nx.DiGraph()
+    support = nx.Graph()
     support.add_nodes_from(graph.nodes(data=True))
     for source, target, data in graph.edges(data=True):
         weight = float(data.get("weight", 1.0))
@@ -288,8 +287,12 @@ def _positive_weight_support(graph: nx.DiGraph) -> nx.DiGraph:
             raise ValueError(
                 f"centrality edge {source!r}->{target!r} has invalid weight {weight!r}"
             )
-        if weight > 0:
-            support.add_edge(source, target, **data)
+        if weight == 0:
+            continue
+        if support.has_edge(source, target):
+            support[source][target]["weight"] += weight
+        else:
+            support.add_edge(source, target, weight=weight)
     return support
 
 
@@ -297,80 +300,46 @@ def directed_eigenvector_centrality(
     graph: nx.DiGraph,
     direction: str = "incoming",
 ) -> CentralityResult:
-    """Compute weighted directed eigenvector centrality with an explicit direction.
+    """Compute weighted eigenvector centrality after removing X-edge directionality.
 
-    ``incoming`` uses the conventional left-eigenvector interpretation: a node is important
-    when important predecessors point to it.  ``outgoing`` applies the same definition to
-    the reversed graph.
-
-    For the SIGMA workflow, ``X`` is a DAG.  Its adjacency matrix is nilpotent and therefore
-    has spectral radius zero, so there is no unique positive Perron vector.  In that exact
-    case SIGMA returns one deterministic non-negative unit-norm zero-eigenvalue vector:
-    equal mass on positive-weight terminal nodes for ``incoming`` (initial nodes for
-    ``outgoing``), and zero elsewhere.  Metadata marks this result as degenerate.
+    ``direction`` is retained only for CLI/API compatibility and is deliberately ignored.
+    Directed X itself is not modified: direction is removed only in the temporary graph used
+    by eigenvector centrality.
     """
     if direction not in {"incoming", "outgoing"}:
         raise ValueError("centrality direction must be 'incoming' or 'outgoing'")
     if graph.number_of_nodes() == 0:
-        return CentralityResult({}, direction, False, None)
+        return CentralityResult({}, "undirected", False, "X is empty.")
 
-    support = _positive_weight_support(graph)
-    work = support if direction == "incoming" else support.reverse(copy=False)
-
-    if nx.is_directed_acyclic_graph(work):
-        terminal_nodes = sorted(
-            [node for node in work.nodes if work.out_degree(node) == 0],
-            key=str,
-        )
-        # A finite DAG always has a terminal node; the fallback is defensive for custom
-        # graph-like objects and keeps the normalization well-defined.
-        if not terminal_nodes:
-            terminal_nodes = sorted(work.nodes, key=str)
-
-        scale = 1.0 / np.sqrt(len(terminal_nodes))
-        terminal_set = set(terminal_nodes)
-        values = {
-            str(node): (scale if node in terminal_set else 0.0)
-            for node in work.nodes
-        }
+    work = _positive_weight_support(graph)
+    if work.number_of_edges() == 0:
+        scale = 1.0 / np.sqrt(work.number_of_nodes())
+        values = {str(node): scale for node in work.nodes}
         note = (
-            "X is a DAG, so its positive-weight adjacency matrix is nilpotent and has "
-            "spectral radius zero. Eigenvector centrality is non-unique; SIGMA uses equal "
-            "unit-norm mass on terminal nodes (after applying the selected direction) and "
-            "zero on non-terminal nodes. Zero-weight edges do not alter this support."
+            "X has no positive-weight edges after removing directionality; SIGMA assigns "
+            "equal unit-norm centrality to all nodes."
         )
-        return CentralityResult(values, direction, True, note)
+        return CentralityResult(values, "undirected", False, note)
 
-    # The branch below is mainly useful if this function is reused outside the strict SIGMA
-    # DAG pipeline.  NetworkX power iteration is preferred; dense eigendecomposition is a
-    # deterministic numerical fallback for smaller graphs that fail to converge.
     try:
         values = nx.eigenvector_centrality(
             work,
             weight="weight",
             max_iter=5_000,
-            tol=1e-12,
+            tol=1e-10,
         )
-    except nx.PowerIterationFailedConvergence:
-        node_order = list(work.nodes)
-        matrix = nx.to_numpy_array(
-            work,
-            nodelist=node_order,
-            weight="weight",
-            dtype=float,
-        )
-        eigenvalues, eigenvectors = np.linalg.eig(matrix.T)
-        index = int(np.argmax(np.abs(eigenvalues)))
-        vector = np.abs(np.real(eigenvectors[:, index]))
-        norm = float(np.linalg.norm(vector))
-        if norm == 0 or not np.isfinite(norm):
-            raise RuntimeError("directed eigenvector centrality is numerically undefined")
-        values = {
-            str(node): float(value / norm)
-            for node, value in zip(node_order, vector, strict=True)
-        }
+    except nx.PowerIterationFailedConvergence as exc:
+        raise RuntimeError(
+            "undirected weighted eigenvector centrality failed to converge"
+        ) from exc
 
     result = {str(node): float(value) for node, value in values.items()}
-    if not np.isfinite(np.fromiter(result.values(), dtype=float)).all():
-        raise RuntimeError("directed eigenvector centrality produced non-finite values")
-    return CentralityResult(result, direction, False, None)
+    array = np.fromiter(result.values(), dtype=float)
+    if not np.isfinite(array).all() or (array < -1e-15).any():
+        raise RuntimeError("undirected eigenvector centrality produced invalid values")
+    note = (
+        "Centrality is weighted eigenvector centrality on the positive-weight undirected "
+        "projection of X. Directed X edges remain unchanged in audit outputs; the legacy "
+        "centrality-direction option is accepted for compatibility but does not alter the result."
+    )
+    return CentralityResult(result, "undirected", False, note)

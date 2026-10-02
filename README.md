@@ -156,7 +156,7 @@ There is no Euclidean center fallback and no Euclidean Voronoi fallback in the r
 
 ## Centrality
 
-The revised workflow specification leaves the Step-6 directed weighted centrality selection open. This reset therefore retains the repository's current directed weighted eigenvector-centrality implementation and records its method/direction/degenerate-DAG note in `sigma_run_metadata.json`. No new centrality definition is introduced by this overlay.
+Network X remains directed in `sigma_X_edges.csv` for audit, but direction is removed before centrality. SIGMA computes weighted eigenvector centrality on the positive-weight undirected projection of X. The legacy `--centrality-direction` option is still accepted for compatibility but does not alter the result. Run metadata records `centrality_method=undirected_weighted_eigenvector` and `centrality_direction=undirected`.
 
 ## Source layout
 

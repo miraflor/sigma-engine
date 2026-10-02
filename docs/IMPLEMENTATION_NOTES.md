@@ -90,9 +90,9 @@ The restart reader accepts the old `network_distance_to_center` name only as an 
 | 6 | existing `spatial_graph.instantiate_network` supplied with the A-reweighted DAG |
 | 7 | `scoring.tempered_point_scores` |
 
-## Important deliberate non-change
+## Centrality correction r7
 
-The specification says "selected directed weighted centrality" but does not define a replacement centrality. The overlay therefore preserves the current directed weighted eigenvector implementation. Because `X` is a DAG, that implementation explicitly records the degenerate nilpotent-adjacency case in run metadata. Changing centrality would be a separate methodological decision, not an implementation correction to this specification.
+Network X remains directed as an audit artifact inherited from the MWAS IO DAG. Before Step-6 eigenvector centrality, SIGMA forms a positive-weight undirected projection of X and computes ordinary weighted eigenvector centrality on that projection. This removes the nilpotent-DAG sink/terminal-node degeneracy without changing MWAS, spatial overlap qualification, road distances, X edge weights, or point-distance tempering. The legacy direction option remains accepted only for compatibility and has no effect.
 
 ## Restart contract
 
