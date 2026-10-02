@@ -1,100 +1,68 @@
-# Overlay manifest
+# SIGMA Engine built-in PSA economic-input patch r6
 
-Prepared against `miraflor/sigma-engine` `main` at commit
-`b02185c2f2e821348e1b03bbcf2cb3640e0588e0`.
+Baseline: `411ad11d9363837bd58d17aa063a285bc5ad7ad1`.
 
-## Files replaced
+## Purpose
 
-```text
-README.md
-APPLY.txt
-pyproject.toml
-src/sigma_engine/__init__.py
-src/sigma_engine/__main__.py
-src/sigma_engine/_version.py
-src/sigma_engine/cli.py
-src/sigma_engine/pipeline.py
-tests/test_cli.py
-tests/test_pipeline.py
-tests/test_pipeline_contracts.py
-```
+Make the normal IO80/IO16 workflow fully self-contained while preserving the
+revised Step-5 distinction:
 
-## Files added
+- transaction values `Z` select MWAS edges;
+- technical coefficients `A` weight surviving edges;
+- `A_ij = Z_ij / x_j`, with `x_j` equal to published total gross output.
 
-```text
-CHANGELOG.md
-OVERLAY_MANIFEST.md
-docs/SIGMA_REVISED_WORKFLOW.md
-docs/IMPLEMENTATION_NOTES.md
-src/sigma_engine/io_workflow.py
-src/sigma_engine/scoring.py
-tests/test_io_workflow_revised.py
-tests/test_scoring.py
-```
+## Bundled economic resources
 
-## Existing files intentionally retained unchanged
+| Classification | Resource | Canonical SHA-256 |
+|---|---|---|
+| IO80 | `src/sigma_engine/resources/psa_2018_io80.csv` | `9335f4de98d6b11205b431f8702f26a2c932d641fdd911ce7ddcf08f604840a1` |
+| IO80 | `src/sigma_engine/resources/psa_2018_io80_total_output.csv` | `7159ef3cdc7368d949b4846e21927ddba3c5d116c7cceafcd9efd48273aca061` |
+| IO16 | `src/sigma_engine/resources/psa_2018_io16.csv` | `f5a2105fc67d2c992eb86531b310b0ce7eff3046a981da88570cea196a49ba76` |
+| IO16 | `src/sigma_engine/resources/psa_2018_io16_total_output.csv` | `8b5653e65002fbedcb7602793da044c4a13cd9664bc0e7f8d7d41ebe9f53e9cf` |
 
-The overlay expects the current repository versions of:
+Text hashes are checked after canonicalizing newline convention, so Git's LF/CRLF
+checkout behavior on Windows does not cause false integrity failures.
 
-```text
-src/sigma_engine/_sparse_hdbscan.py
-src/sigma_engine/_sparse_network.py
-src/sigma_engine/_sparse_solver.py
-src/sigma_engine/builtin_io.py
-src/sigma_engine/center.py
-src/sigma_engine/clustering.py
-src/sigma_engine/io_dag.py
-src/sigma_engine/io_utils.py
-src/sigma_engine/network.py
-src/sigma_engine/point_input.py
-src/sigma_engine/progress.py
-src/sigma_engine/spatial_graph.py
-src/sigma_engine/voronoi.py
-src/sigma_engine/resources/*
-```
+## Files in the overlay
 
-This is deliberate: the revised workflow changes their composition and contracts, not
-the already-working spatial/MWAS primitives themselves.
+- `APPLY.txt`
+- `CHANGELOG.md`
+- `CHECKSUMS.sha256`
+- `OVERLAY_MANIFEST.md`
+- `README.md`
+- `docs/IMPLEMENTATION_NOTES.md`
+- `docs/SIGMA_REVISED_WORKFLOW.md`
+- `docs/TESTING.md`
+- `src/sigma_engine/builtin_io.py`
+- `src/sigma_engine/cli.py`
+- `src/sigma_engine/io_workflow.py`
+- `src/sigma_engine/pipeline.py`
+- `src/sigma_engine/resources/NOTICE.txt`
+- `src/sigma_engine/resources/psa_2018_io16.csv`
+- `src/sigma_engine/resources/psa_2018_io16_total_output.csv`
+- `src/sigma_engine/resources/psa_2018_io80.csv`
+- `src/sigma_engine/resources/psa_2018_io80_total_output.csv`
+- `tests/test_builtin_total_output.py`
+- `tests/test_cli.py`
+- `tests/test_io_input_resolution.py`
+- `tests/test_io_workflow_revised.py`
 
-## Stale files that may be deleted
+## Default economic-input behavior
 
-```text
-APPLY_AUGMENTED_ROAD_CHECKPOINT.txt
-APPLY_XFIX.txt
-```
+With no economic-file arguments:
 
-The new runtime ignores old `.sigma_checkpoints` directories. Existing output artifacts
-remain usable through `sigma-engine from-partitions`.
+1. `classification=io80` loads the internal 80-industry `Z` and `x` resources.
+2. `classification=io16` loads the internal 16-industry `Z` and `x` resources.
+3. SIGMA derives `A` column-wise from `Z/x`.
+4. Fast MWAS selects the acyclic edge set from transaction weights in `Z`.
+5. Only surviving MWAS edges are reweighted with `A`.
 
-## Correction r2
+`--transactions` and `--technical-coefficients` remain optional custom overrides.
+A full custom transaction workbook may provide its own explicit `Total Output` column.
+A square intermediate-only custom matrix cannot manufacture `x` from column sums.
 
-This package supersedes the first v0.1.0 overlay produced on 2026-10-02. It keeps the
-same target reset version and baseline commit, but fixes the first overlay's acceptance
-and compatibility defects:
+## Source
 
-```text
-- legacy CSV sector IDs are normalized on restore (01 stays 01)
-- CLI tests inspect declared options rather than terminal-wrapped Rich help
-- restart artifacts reject legacy Euclidean point-center fallbacks
-- restart artifact CRS/geometry/distance/point-ID invariants are validated
-- Step-2 public clustered output carries snapped network position and snap distance
-- overlay-owned lint findings are fixed
-- fail-fast application/verification script is included under tools/
-```
-
-The repository-wide Ruff findings in untouched baseline spatial modules are not modified
-by this workflow overlay. Full repository pytest remains the behavioral acceptance gate.
-
-## Correction r4
-
-This package supersedes r2 only to correct the remaining Ruff I001 finding in
-`src/sigma_engine/pipeline.py`. The change is import formatting only; workflow semantics
-and all public contracts are unchanged from r2.
-
-## r4 verification note
-
-The r4 application script intentionally runs `ruff check --select I --fix` on the
-overlay-owned Python files before the ordinary Ruff gate. This delegates import ordering
-to the exact Ruff version installed in the target environment, then verifies the resulting
-files with a second no-fix lint pass. The import-only normalization does not change runtime
-logic.
+Philippine Statistics Authority, 2018 Benchmark Input-Output Accounts of the
+Philippines, released 9 December 2021, Reference No. 2021-510. The PSA release
+publishes transaction tables at 16x16, 80x80, and 240x240 resolution.

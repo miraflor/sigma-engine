@@ -64,7 +64,6 @@ def test_cli_fast_mwas_and_tempering_are_defaults(monkeypatch):
             "--points", "points.parquet",
             "--roads", "roads.gpkg",
             "--boundary", "boundary.gpkg",
-            "--technical-coefficients", "A.xlsx",
             "--output-dir", "out",
         ],
     )
@@ -73,6 +72,7 @@ def test_cli_fast_mwas_and_tempering_are_defaults(monkeypatch):
     assert captured[-1].mwas_method == "fast"
     assert captured[-1].distance_tempering == 0.15
     assert captured[-1].transactions_override_path is None
+    assert captured[-1].technical_coefficients_path is None
 
 
 def test_from_partitions_passes_restart_artifacts(monkeypatch):
@@ -90,7 +90,6 @@ def test_from_partitions_passes_restart_artifacts(monkeypatch):
             "from-partitions",
             "--partitions", "sigma_partitions.parquet",
             "--roads", "roads.gpkg",
-            "--technical-coefficients", "A.xlsx",
             "--output-dir", "out",
         ],
     )
@@ -98,3 +97,4 @@ def test_from_partitions_passes_restart_artifacts(monkeypatch):
     assert captured[-1].centers_path is None
     assert captured[-1].points_with_center_distance_path is None
     assert captured[-1].mwas_method == "fast"
+    assert captured[-1].technical_coefficients_path is None

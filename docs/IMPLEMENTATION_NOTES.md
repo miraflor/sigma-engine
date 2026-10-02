@@ -36,7 +36,7 @@ Z -> MWAS -> surviving edge set
 A -> reweight only those surviving edges
 ```
 
-The downstream graph's `weight` is therefore `A_ab`, while `transaction_value=z_ab` is retained for audit.
+The downstream graph's `weight` is therefore `A_ab`, while `transaction_value=z_ab` is retained for audit. Normal IO80/IO16 runs now load a bundled PSA transaction matrix `Z` plus an aligned bundled gross-output vector `x` and derive `A_ij = Z_ij / x_j` internally. A full custom transaction workbook can supply its own `Total Output` vector, and an explicit A matrix remains an override. Intermediate-input column sums are never substituted for gross output.
 
 ### 2. Step 7 used inverse distance
 
@@ -96,17 +96,15 @@ The specification says "selected directed weighted centrality" but does not defi
 
 ## Restart contract
 
-`from-partitions` requires:
+`from-partitions` requires only:
 
 ```text
 sigma_partitions.parquet
 sigma_network_centers.parquet
 sigma_points_with_center_distance.parquet
 roads
-transactions Z (bundled by default)
-technical coefficients A (required)
 ```
 
-If centers/point-distance paths are omitted, they are resolved beside the partition file.
+The economic inputs default to the bundled PSA IO80 resources (`--classification io16` selects the bundled IO16 pair). `--transactions` and `--technical-coefficients` are optional custom overrides. If centers/point-distance paths are omitted, they are resolved beside the partition file.
 
 The command executes no HDBSCAN, no 1-median optimization, and no Voronoi computation.

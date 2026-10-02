@@ -31,3 +31,13 @@
 - Verify the downloaded overlay ZIP checksum before extraction.
 - No runtime, algorithm, CLI, artifact-schema, or scoring behavior changes from r2/r3.
 - Continue to run the full repository pytest suite as the behavioral acceptance gate.
+
+## Built-in PSA economic-input patch r6
+
+- Bundle compact PSA 2018 gross-output vectors for both IO80 and IO16 beside the existing transaction matrices.
+- Make normal IO80/IO16 runs fully self-contained: bundled `Z` selects MWAS edges and bundled `x` derives `A_ij = Z_ij / x_j`.
+- Keep `--transactions` and `--technical-coefficients` only as explicit custom overrides.
+- Verify all four bundled economic resources by SHA-256 at load time.
+- Record the built-in gross-output resource hash in run metadata.
+- Preserve full-workbook Total Output extraction for custom transaction overrides.
+- Add regression tests proving that no external economic file is required and that intermediate column sums are never used as gross output.

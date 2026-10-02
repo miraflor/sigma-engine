@@ -36,19 +36,25 @@ def run(
     points: Annotated[Path, typer.Option("--points", help="Classified point vector/GeoParquet.")],
     roads: Annotated[Path, typer.Option("--roads", help="Projected road line dataset.")],
     boundary: Annotated[Path, typer.Option("--boundary", help="Study boundary polygon.")],
+    output_dir: Annotated[Path, typer.Option("--output-dir", help="Output directory.")],
     technical_coefficients: Annotated[
-        Path,
+        Path | None,
         typer.Option(
             "--technical-coefficients",
-            help="IO technical-coefficient matrix A. Required; never inferred from Z.",
+            help=(
+                "Optional A override. If omitted, derive A=Z/x from the bundled PSA "
+                "gross-output vector (or from a full --transactions workbook override)."
+            ),
         ),
-    ],
-    output_dir: Annotated[Path, typer.Option("--output-dir", help="Output directory.")],
+    ] = None,
     transactions: Annotated[
         Path | None,
         typer.Option(
             "--transactions",
-            help="Optional transaction matrix Z override; bundled PSA matrix is default.",
+            help=(
+                "Optional transaction-table override. Bundled PSA IO80/IO16 is the default; "
+                "a full workbook can also supply x for automatic A=Z/x derivation."
+            ),
         ),
     ] = None,
     classification: Annotated[
@@ -143,7 +149,9 @@ def run(
         boundary_path=str(boundary),
         output_dir=str(output_dir),
         points_path=str(points),
-        technical_coefficients_path=str(technical_coefficients),
+        technical_coefficients_path=(
+            str(technical_coefficients) if technical_coefficients else None
+        ),
         classification=classification,  # validated in pipeline
         transactions_override_path=str(transactions) if transactions else None,
         io80_column=io80_column,
@@ -189,13 +197,19 @@ def from_partitions(
         ),
     ],
     roads: Annotated[Path, typer.Option("--roads", help="Same projected road dataset.")],
-    technical_coefficients: Annotated[
-        Path,
-        typer.Option("--technical-coefficients", help="IO technical-coefficient matrix A."),
-    ],
     output_dir: Annotated[
         Path, typer.Option("--output-dir", help="Output directory for Steps 5-7.")
     ],
+    technical_coefficients: Annotated[
+        Path | None,
+        typer.Option(
+            "--technical-coefficients",
+            help=(
+                "Optional A override. If omitted, derive A=Z/x from the bundled PSA "
+                "gross-output vector (or from a full --transactions workbook override)."
+            ),
+        ),
+    ] = None,
     centers: Annotated[
         Path | None,
         typer.Option(
@@ -215,7 +229,13 @@ def from_partitions(
     ] = None,
     transactions: Annotated[
         Path | None,
-        typer.Option("--transactions", help="Optional transaction matrix Z override."),
+        typer.Option(
+            "--transactions",
+            help=(
+                "Optional transaction-table override. Bundled PSA IO80/IO16 is the default; "
+                "a full workbook can also supply x for automatic A=Z/x derivation."
+            ),
+        ),
     ] = None,
     classification: Annotated[
         str, typer.Option("--classification", help="io80 (default) or io16.")
@@ -251,8 +271,10 @@ def from_partitions(
     config = ContinueConfig(
         roads_path=str(roads),
         partitions_path=str(partitions),
-        technical_coefficients_path=str(technical_coefficients),
         output_dir=str(output_dir),
+        technical_coefficients_path=(
+            str(technical_coefficients) if technical_coefficients else None
+        ),
         centers_path=str(centers) if centers else None,
         points_with_center_distance_path=(
             str(points_with_center_distance) if points_with_center_distance else None

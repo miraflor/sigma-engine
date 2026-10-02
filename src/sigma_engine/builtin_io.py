@@ -1,9 +1,9 @@
 """Built-in Philippine input-output tables and explicit custom overrides.
 
-The engine owns its economic-network specification.  Normal runs therefore select the
-bundled 2018 PSA transaction matrix that matches ``classification``; callers do not need
-to pass an IO workbook.  A custom table remains available as an explicit experimental
-override rather than part of the ordinary workflow.
+Normal SIGMA runs are self-contained: the package ships the normalized 2018 PSA
+IO80 and IO16 intermediate transaction matrices together with the corresponding
+sector gross-output vectors.  ``Z`` therefore selects MWAS edges and ``A`` can be
+derived internally as ``A_ij = Z_ij / x_j`` without an external economic file.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 import pandas as pd
 
 from .io_dag import read_io_table
@@ -48,16 +49,22 @@ _BUILTINS: dict[str, tuple[str, int, str, str]] = {
     ),
 }
 
+_TOTAL_OUTPUTS: dict[str, tuple[str, int, str]] = {
+    "io80": (
+        "psa_2018_io80_total_output.csv",
+        80,
+        "7159ef3cdc7368d949b4846e21927ddba3c5d116c7cceafcd9efd48273aca061",
+    ),
+    "io16": (
+        "psa_2018_io16_total_output.csv",
+        16,
+        "8b5653e65002fbedcb7602793da044c4a13cd9664bc0e7f8d7d41ebe9f53e9cf",
+    ),
+}
+
 
 def _canonical_text_sha256(payload: bytes) -> str:
-    """Hash a text resource independently of checkout newline convention.
-
-    Git may materialize text files with CRLF on Windows and LF on Unix-like systems.
-    The IO matrix values are unchanged by that translation, so the integrity check
-    canonicalizes all text newlines to LF before hashing. This still detects any
-    substantive byte change while avoiding false failures caused solely by Git EOL
-    conversion.
-    """
+    """Hash a text resource independently of checkout newline convention."""
     normalized = payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     return hashlib.sha256(normalized).hexdigest()
 
@@ -78,8 +85,6 @@ def _load_builtin(classification: str) -> tuple[pd.DataFrame, IOInputInfo]:
             f"expected {expected_sha256}, got {actual_sha256}"
         )
 
-    # ``as_file`` works both for an editable source tree and for a wheel whose resources
-    # may not have a permanent filesystem path.
     with as_file(resource) as materialized:
         table = read_io_table(materialized, expected_sector_count=sector_count)
 
@@ -95,18 +100,60 @@ def _load_builtin(classification: str) -> tuple[pd.DataFrame, IOInputInfo]:
     )
 
 
+def load_builtin_total_output(classification: str) -> pd.Series:
+    """Load the packaged gross-output vector aligned to the built-in IO matrix."""
+    try:
+        filename, sector_count, expected_sha256 = _TOTAL_OUTPUTS[classification]
+    except KeyError as exc:
+        raise ValueError("classification must be 'io80' or 'io16'") from exc
+
+    resource = files("sigma_engine.resources").joinpath(filename)
+    payload = resource.read_bytes()
+    actual_sha256 = _canonical_text_sha256(payload)
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            f"bundled {classification} total-output resource failed integrity check: "
+            f"expected {expected_sha256}, got {actual_sha256}"
+        )
+
+    with as_file(resource) as materialized:
+        frame = pd.read_csv(materialized, dtype={"sector": str})
+
+    if list(frame.columns) != ["sector", "total_output"]:
+        raise RuntimeError(
+            f"bundled {classification} total-output resource has an unexpected schema"
+        )
+    canonical = [f"{position:02d}" for position in range(1, sector_count + 1)]
+    sectors = frame["sector"].astype(str).str.zfill(2).tolist()
+    if sectors != canonical:
+        raise RuntimeError(
+            f"bundled {classification} total-output sectors are not canonical 01..{sector_count}"
+        )
+
+    values = pd.to_numeric(frame["total_output"], errors="coerce").to_numpy(float)
+    if len(values) != sector_count or not np.isfinite(values).all() or np.any(values <= 0):
+        raise RuntimeError(
+            f"bundled {classification} total output must contain {sector_count} finite "
+            "strictly-positive values"
+        )
+
+    output = pd.Series(values, index=canonical, dtype=float, name="total_output")
+    output.attrs["source_id"] = f"psa-2018-{classification}-total-output"
+    output.attrs["source_kind"] = "builtin"
+    output.attrs["source_url"] = PSA_RELEASE_URL
+    output.attrs["reference_year"] = 2018
+    output.attrs["resource_sha256"] = actual_sha256
+    output.attrs["resource_filename"] = filename
+    return output
+
+
 def load_engine_io_table(
     classification: str,
     *,
     override_path: str | Path | None = None,
     sheet_name: str | int = 0,
 ) -> tuple[pd.DataFrame, IOInputInfo]:
-    """Resolve the IO matrix for one engine run.
-
-    Built-in IO80 is selected by the engine's default ``classification='io80'``.  IO16
-    selects the bundled 16-sector aggregation.  ``override_path`` is intentionally explicit:
-    supplying it replaces the built-in matrix for custom/experimental work only.
-    """
+    """Resolve the transaction matrix for one engine run."""
     if classification not in _BUILTINS:
         raise ValueError("classification must be 'io80' or 'io16'")
 

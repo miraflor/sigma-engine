@@ -20,11 +20,16 @@ import shapely
 
 from ._sparse_solver import SparseRoadSolver
 from ._version import __version__
-from .builtin_io import load_engine_io_table
+from .builtin_io import load_builtin_total_output, load_engine_io_table
 from .center import cluster_centers
 from .clustering import ClusteringConfig, cluster_by_type, prepare_sparse_context, retained_points
 from .io_utils import normalize_sector_id, read_vector, write_geoparquet
-from .io_workflow import build_io_dag, read_technical_coefficients
+from .io_workflow import (
+    build_io_dag,
+    derive_technical_coefficients,
+    read_technical_coefficients,
+    read_total_output_vector,
+)
 from .network import AugmentedNetwork, RoadNetwork, SnappedPoints
 from .point_input import prepare_point_input
 from .scoring import tempered_point_scores
@@ -44,8 +49,8 @@ class EngineConfig:
     boundary_path: str
     output_dir: str
     points_path: str
-    technical_coefficients_path: str
 
+    technical_coefficients_path: str | None = None
     classification: Classification = "io80"
     transactions_override_path: str | None = None
     io80_column: str | None = None
@@ -87,9 +92,9 @@ class ContinueConfig:
 
     roads_path: str
     partitions_path: str
-    technical_coefficients_path: str
     output_dir: str
 
+    technical_coefficients_path: str | None = None
     centers_path: str | None = None
     points_with_center_distance_path: str | None = None
     classification: Classification = "io80"
@@ -368,7 +373,7 @@ def _load_io_pair(
     classification: str,
     transactions_override_path: str | None,
     transactions_sheet: str | int,
-    technical_coefficients_path: str,
+    technical_coefficients_path: str | None,
     technical_coefficients_sheet: str | int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, object]:
     transactions, info = load_engine_io_table(
@@ -376,10 +381,48 @@ def _load_io_pair(
         override_path=transactions_override_path,
         sheet_name=transactions_sheet,
     )
-    coefficients = read_technical_coefficients(
-        _require_file(technical_coefficients_path, "technical coefficient matrix"),
-        sheet_name=technical_coefficients_sheet,
-        expected_sector_count=_expected_sector_count(classification),
+    expected = _expected_sector_count(classification)
+
+    if technical_coefficients_path is not None:
+        coefficient_path = _require_file(
+            technical_coefficients_path, "technical coefficient matrix"
+        )
+        coefficients = read_technical_coefficients(
+            coefficient_path,
+            sheet_name=technical_coefficients_sheet,
+            expected_sector_count=expected,
+        )
+        coefficients.attrs["technical_coefficient_source"] = "explicit_matrix_override"
+        coefficients.attrs["technical_coefficient_source_path"] = str(coefficient_path)
+        return transactions, coefficients, info
+
+    if transactions_override_path is None:
+        total_output = load_builtin_total_output(classification)
+        coefficients = derive_technical_coefficients(transactions, total_output)
+        coefficients.attrs["technical_coefficient_source"] = (
+            "derived_from_builtin_psa_total_output"
+        )
+        coefficients.attrs["technical_coefficient_source_path"] = (
+            f"package:{total_output.attrs.get('resource_filename')}"
+        )
+        coefficients.attrs["total_output_resource_sha256"] = total_output.attrs.get(
+            "resource_sha256"
+        )
+        return transactions, coefficients, info
+
+    transaction_path = _require_file(
+        transactions_override_path, "full transaction workbook"
+    )
+    total_output = read_total_output_vector(
+        transaction_path,
+        sheet_name=transactions_sheet,
+        sector_ids=transactions.columns,
+    )
+    coefficients = derive_technical_coefficients(transactions, total_output)
+    coefficients.attrs["technical_coefficient_source"] = "derived_from_transaction_total_output"
+    coefficients.attrs["technical_coefficient_source_path"] = str(transaction_path)
+    coefficients.attrs["total_output_source_column_zero_based"] = total_output.attrs.get(
+        "source_column_zero_based"
     )
     return transactions, coefficients, info
 
@@ -611,9 +654,18 @@ def run_engine(config: EngineConfig) -> EngineResult:
     _require_file(config.points_path, "classified points")
     _require_file(config.roads_path, "road network")
     _require_file(config.boundary_path, "study boundary")
-    _require_file(config.technical_coefficients_path, "technical coefficient matrix")
+    if config.technical_coefficients_path is not None:
+        _require_file(config.technical_coefficients_path, "technical coefficient matrix")
     if config.transactions_override_path is not None:
         _require_file(config.transactions_override_path, "transaction matrix override")
+
+    transactions, coefficients, io_info = _load_io_pair(
+        classification=config.classification,
+        transactions_override_path=config.transactions_override_path,
+        transactions_sheet=config.transactions_sheet,
+        technical_coefficients_path=config.technical_coefficients_path,
+        technical_coefficients_sheet=config.technical_coefficients_sheet,
+    )
 
     output_dir = Path(config.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -642,13 +694,6 @@ def run_engine(config: EngineConfig) -> EngineResult:
                 f"{config.max_snap_distance:g}"
             )
 
-    transactions, coefficients, io_info = _load_io_pair(
-        classification=config.classification,
-        transactions_override_path=config.transactions_override_path,
-        transactions_sheet=config.transactions_sheet,
-        technical_coefficients_path=config.technical_coefficients_path,
-        technical_coefficients_sheet=config.technical_coefficients_sheet,
-    )
     _validate_point_types(points, transactions)
 
     _report(config.progress, "Step 2: network HDBSCAN independently within each type")
@@ -753,7 +798,18 @@ def run_engine(config: EngineConfig) -> EngineResult:
         "classification": config.classification,
         "classification_column": point_info.classification_column,
         "transaction_source": getattr(io_info, "source_id", None),
-        "technical_coefficients_path": str(Path(config.technical_coefficients_path).resolve()),
+        "technical_coefficient_source": coefficients.attrs.get(
+            "technical_coefficient_source"
+        ),
+        "technical_coefficient_source_path": coefficients.attrs.get(
+            "technical_coefficient_source_path"
+        ),
+        "total_output_source_column_zero_based": coefficients.attrs.get(
+            "total_output_source_column_zero_based"
+        ),
+        "total_output_resource_sha256": coefficients.attrs.get(
+            "total_output_resource_sha256"
+        ),
         "cluster_count": cluster_count,
         "stage_artifacts_are_restart_boundaries": True,
         **late_meta,
@@ -883,9 +939,18 @@ def run_from_partitions(config: ContinueConfig) -> EngineResult:
         distance_tempering=config.distance_tempering,
     )
     _require_file(config.roads_path, "road network")
-    _require_file(config.technical_coefficients_path, "technical coefficient matrix")
+    if config.technical_coefficients_path is not None:
+        _require_file(config.technical_coefficients_path, "technical coefficient matrix")
     if config.transactions_override_path is not None:
         _require_file(config.transactions_override_path, "transaction matrix override")
+
+    transactions, coefficients, io_info = _load_io_pair(
+        classification=config.classification,
+        transactions_override_path=config.transactions_override_path,
+        transactions_sheet=config.transactions_sheet,
+        technical_coefficients_path=config.technical_coefficients_path,
+        technical_coefficients_sheet=config.technical_coefficients_sheet,
+    )
     partitions_path, centers_path, points_path = _resolve_restart_paths(config)
 
     partitions = _clean_partition_output(gpd.read_parquet(partitions_path))
@@ -896,13 +961,6 @@ def run_from_partitions(config: ContinueConfig) -> EngineResult:
     )
     _assert_cluster_invariant(points, centers, partitions)
 
-    transactions, coefficients, io_info = _load_io_pair(
-        classification=config.classification,
-        transactions_override_path=config.transactions_override_path,
-        transactions_sheet=config.transactions_sheet,
-        technical_coefficients_path=config.technical_coefficients_path,
-        technical_coefficients_sheet=config.technical_coefficients_sheet,
-    )
     _validate_point_types(points, transactions)
 
     _report(config.progress, "Restart: rebuilding road graph from saved median geometries")
@@ -936,7 +994,18 @@ def run_from_partitions(config: ContinueConfig) -> EngineResult:
         "entrypoint": "from-partitions",
         "classification": config.classification,
         "transaction_source": getattr(io_info, "source_id", None),
-        "technical_coefficients_path": str(Path(config.technical_coefficients_path).resolve()),
+        "technical_coefficient_source": coefficients.attrs.get(
+            "technical_coefficient_source"
+        ),
+        "technical_coefficient_source_path": coefficients.attrs.get(
+            "technical_coefficient_source_path"
+        ),
+        "total_output_source_column_zero_based": coefficients.attrs.get(
+            "total_output_source_column_zero_based"
+        ),
+        "total_output_resource_sha256": coefficients.attrs.get(
+            "total_output_resource_sha256"
+        ),
         "input_partitions": str(partitions_path),
         "input_centers": str(centers_path),
         "input_points_with_center_distance": str(points_path),

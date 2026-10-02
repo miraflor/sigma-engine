@@ -28,12 +28,10 @@ run:
 python -m sigma_engine from-partitions `
   --partitions "C:\path\existing_output\sigma_partitions.parquet" `
   --roads "C:\path\same_roads.gpkg" `
-  --technical-coefficients "C:\path\technical_coefficients.xlsx" `
   --output-dir "C:\path\revised_output"
 ```
 
-The command auto-detects the center and point-distance files beside the partition file.
-It does not rerun HDBSCAN, 1-medians, or network Voronoi.
+The command auto-detects the center and point-distance files beside the partition file. It uses bundled PSA IO80 by default (or IO16 when selected), derives the technical-coefficient matrix from the bundled gross-output vector, and does not rerun HDBSCAN, 1-medians, or network Voronoi. `--transactions` and `--technical-coefficients` remain explicit custom overrides only.
 
 Expected revised outputs:
 

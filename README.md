@@ -38,7 +38,7 @@ cluster centrality
 point score = cluster_centrality * (1 - lambda * bounded_cluster_distance)
 ```
 
-The key Step-5 rule is strict: **transactions select edges; technical coefficients weight the surviving DAG**. `A` is never approximated by normalizing the intermediate-transactions block.
+The key Step-5 rule is strict: **transactions select edges; technical coefficients weight the surviving DAG**. The package now ships the PSA 2018 IO80 and IO16 intermediate transaction blocks together with their aligned gross-output vectors, so normal runs derive `A_ij = Z_ij / x_j` internally. SIGMA never substitutes the intermediate-input column sum for gross output.
 
 ## Primary artifacts
 
@@ -56,19 +56,20 @@ The key Step-5 rule is strict: **transactions select edges; technical coefficien
 
 The public Step-2/3/4 artifacts are also the durable restart boundaries. The reset does not hide a second competing semantic state inside checkpoint-only files.
 
-## Required economic inputs
+## Built-in PSA economic inputs
 
-`--classification io80` remains the default. The bundled PSA transaction matrix is still used unless `--transactions` is supplied.
+Normal runs require **no external IO file**. `--classification io80` (default) uses the bundled PSA 2018 80-industry transaction block and gross-output vector; `--classification io16` uses the corresponding 16-industry resources. Rows are suppliers and columns are users.
 
-A **technical-coefficient matrix is required**:
+Step 5 therefore resolves internally as:
 
 ```text
---technical-coefficients <A.xlsx|A.csv|A.parquet>
+bundled PSA transactions Z -> MWAS -> surviving sector edges
+bundled PSA total output x -> A_ij = Z_ij / x_j -> downstream edge weights
 ```
 
-This is intentional. From a square intermediate-transactions block `Z` alone, `A_ab = z_ab / x_b` cannot be reconstructed unless total output `x_b` is also known. The engine therefore refuses to fabricate `A`.
+The bundled resources are preprocessed from the PSA 2018 benchmark transaction tables: presentation-only headings/final-demand columns are omitted, sector order is normalized to canonical SIGMA codes, and the published `Total Output` values are retained separately as compact `sector,total_output` files. Resource hashes are verified at load time.
 
-Both matrices must have the same sector set and orientation: rows are suppliers, columns are users.
+`--transactions` remains an explicit custom override. If it is a full PSA-style workbook and `--technical-coefficients` is omitted, SIGMA can read its `Total Output` column and derive `A` from that override. `--technical-coefficients` remains an explicit A override. Neither option is needed for the built-in IO80/IO16 workflow.
 
 ## Full run
 
@@ -77,7 +78,6 @@ sigma-engine run `
   --points "C:\path\classified_points.parquet" `
   --roads "C:\path\roads.gpkg" `
   --boundary "C:\path\boundary.gpkg" `
-  --technical-coefficients "C:\path\technical_coefficients.xlsx" `
   --output-dir "C:\path\sigma_output"
 ```
 
@@ -110,7 +110,6 @@ This command is specifically for an output directory where Steps 2--4 were alrea
 sigma-engine from-partitions `
   --partitions "C:\path\old_output\sigma_partitions.parquet" `
   --roads "C:\path\roads.gpkg" `
-  --technical-coefficients "C:\path\technical_coefficients.xlsx" `
   --output-dir "C:\path\revised_output"
 ```
 
@@ -143,6 +142,7 @@ number of retained clusters
 The engine also refuses to continue when:
 
 - the transaction and technical-coefficient matrices have different sector sets;
+- a custom transaction workbook is asked to derive A but has no unambiguous positive `Total Output` column aligned with the IO rows;
 - a retained spatial type is missing from the IO matrix;
 - MWAS does not return a DAG;
 - a retained positive transaction edge has a non-positive technical coefficient;

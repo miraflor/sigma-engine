@@ -1,4 +1,4 @@
-﻿# SIGMA Engine â€” Revised Workflow Specification
+# SIGMA Engine — Revised Workflow Specification
 
 **Status:** Revised workflow handoff for a clean restart
 **Target reset version:** `v0.1.0`
@@ -74,7 +74,7 @@ Key dependencies:
 
 # 3. Step-by-step workflow
 
-## Step 1 â€” Classified points and road-network positioning
+## Step 1 — Classified points and road-network positioning
 
 ### Input
 A point GeoParquet containing already-classified establishments/POIs.
@@ -117,7 +117,7 @@ snap_distance
 
 This output feeds Step 2.
 
-## Step 2 â€” Network HDBSCAN within each type
+## Step 2 — Network HDBSCAN within each type
 
 ### Input
 For one type \(s\):
@@ -164,7 +164,7 @@ network_position
 
 The Step-2 output branches independently into Steps 3 and 4.
 
-## Step 3 â€” Network 1-median for each cluster
+## Step 3 — Network 1-median for each cluster
 
 ### Input
 For one retained cluster
@@ -222,7 +222,7 @@ representing \(d_G(p_{s,c,i},M_{s,c})\).
 - **Step 6:** \(M_{s,c}\) is used to calculate road-network distances between connected cluster nodes.
 - **Step 7:** point-to-own-median distances mildly differentiate points within the same cluster.
 
-## Step 4 â€” One spatial partition shape per cluster
+## Step 4 — One spatial partition shape per cluster
 
 ### Input
 For one type \(s\):
@@ -310,11 +310,11 @@ sigma_partitions.parquet
 
 One row per retained `[type, cluster]`.
 
-## Step 5 â€” IO DAG: MWAS selection from transactions, final weights from technical coefficients
+## Step 5 — IO DAG: MWAS selection from transactions, final weights from technical coefficients
 
 Step 5 intentionally uses two IO matrices for two different purposes.
 
-### Input A â€” Transactions table
+### Input A — Transactions table
 Let
 
 \[
@@ -323,7 +323,7 @@ Z=[z_{ab}]
 
 be the IO transactions matrix.
 
-### Processing A â€” MWAS edge selection
+### Processing A — MWAS edge selection
 1. construct the directed weighted sector graph from \(Z\);
 2. use transaction values \(z_{ab}\) as the MWAS weights;
 3. apply **fast MWAS by default**;
@@ -337,16 +337,14 @@ E_{\text{MWAS}}.
 
 Transactions determine **which edges survive**.
 
-### Input B â€” Technical-coefficient matrix
+### Input B — Technical coefficients from total output or explicit A
 Let
 
 \[
 A=[A_{ab}]
 \]
 
-be the technical-coefficient matrix.
-
-Under the usual IO orientation:
+be the technical-coefficient matrix. Under the usual IO orientation:
 
 \[
 A_{ab}=\frac{z_{ab}}{x_b},
@@ -354,7 +352,9 @@ A_{ab}=\frac{z_{ab}}{x_b},
 
 where \(x_b\) is total output of sector \(b\).
 
-### Processing B â€” Reweight surviving DAG edges
+For the built-in PSA IO80 and IO16 configurations, the engine ships the aligned **Total Output** vector with the transaction block and derives \(A\) directly from \(Z\) and \(x\). A full custom transaction workbook may instead supply its own `Total Output` column, and a separately supplied technical-coefficient matrix remains a valid override. The intermediate-demand column sum is **not** a substitute for total output.
+
+### Processing B — Reweight surviving DAG edges
 For every surviving MWAS edge
 
 \[
@@ -422,7 +422,7 @@ mwas_method
 
 The graph edge weight used downstream is `technical_coefficient`.
 
-## Step 6 â€” Spatial-economic graph X
+## Step 6 — Spatial-economic graph X
 
 ### Inputs
 Step 6 combines:
@@ -610,7 +610,7 @@ sigma_disconnected_overlap_pairs.csv
 
 for positive-area partition overlaps whose cluster medians are disconnected on the road network.
 
-## Step 7 â€” Point-level SIGMA score with tempered distance effect
+## Step 7 — Point-level SIGMA score with tempered distance effect
 
 ### Objective
 All points in the same cluster inherit the same cluster-level economic-spatial centrality.

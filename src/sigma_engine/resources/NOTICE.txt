@@ -3,11 +3,15 @@ Bundled Philippine input-output resources
 
 Files
 -----
-- psa_2018_io80.csv: 2018 benchmark 80-industry transaction matrix.
-- psa_2018_io16.csv: 2018 benchmark 16-industry transaction matrix.
+- psa_2018_io80.csv: 2018 benchmark 80-industry intermediate transaction matrix Z.
+- psa_2018_io80_total_output.csv: aligned 80-industry gross-output vector x.
+- psa_2018_io16.csv: 2018 benchmark 16-industry intermediate transaction matrix Z.
+- psa_2018_io16_total_output.csv: aligned 16-industry gross-output vector x.
 
-Rows are suppliers and columns are users. Values are in million Philippine pesos.
-Sector identifiers are normalized to SIGMA's canonical 01..80 / 01..16 ordering.
+Rows of Z are suppliers and columns are users. Values of Z and x are in million
+Philippine pesos. Sector identifiers are normalized to SIGMA's canonical 01..80 /
+01..16 ordering. Technical coefficients are not stored separately: SIGMA derives
+A_ij = Z_ij / x_j at runtime.
 
 Source
 ------
@@ -15,14 +19,22 @@ Philippine Statistics Authority, "PSA releases the 2018 Input-Output Tables",
 Reference No. 2021-510, released 9 December 2021.
 https://psa.gov.ph/content/psa-releases-2018-input-output-tables
 
-The PSA page states that the 2018 benchmark accounts include transaction tables at
-16x16, 80x80, and 240x240 resolution. The PSA website states that its data and content
-are licensed under CC BY 4.0 unless otherwise stated.
+The PSA release provides I-O Transaction Tables, Technical Coefficient Matrices,
+and Leontief Inverse Matrices at 16x16, 80x80, and 240x240 resolution. The source
+transaction workbooks used here are:
+- 80-Industry Transaction Table, 2018.xlsx
+- 16-Industry Transaction Table, 2018.xlsx
 
-Normalization
+The PSA website states that its data/content are CC BY 4.0 unless otherwise stated.
+
+Preprocessing
 -------------
-The packaged CSVs contain only the square intermediate transaction blocks needed by
-SIGMA Engine. Presentation-only rows/columns are omitted and sector positions are
-renamed to canonical two-digit identifiers. No weights are rescaled or approximated.
-The IO16 and IO80 matrices have the same total intermediate use:
-18,274,281.3667199 million PHP.
+The package keeps the exact square intermediate transaction blocks already used by
+SIGMA and retains the published sector Total Output values as separate compact
+sector,total_output resources. Presentation headings and unrelated final-demand
+columns are omitted. No intermediate transaction weights are rescaled.
+
+The IO16 and IO80 transaction matrices have the same aggregate intermediate-use
+total: 18,274,281.3667199 million PHP. The IO16 gross-output vector agrees with
+aggregation of IO80 gross output to within 0.1 million PHP, consistent with source
+rounding/aggregation. Resource hashes are checked at load time.
