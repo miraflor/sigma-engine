@@ -49,3 +49,13 @@
 - Keep the legacy centrality-direction option temporarily for compatibility; it no longer changes the result.
 - Mark run metadata as `undirected_weighted_eigenvector` / `undirected`.
 - Remove the DAG terminal-node fallback that concentrated centrality on sinks.
+
+## Spatial outputs + sigma-siphon area integration overlay r8
+
+- Add one `sigma_spatial_outputs.gpkg` per run with `clusters`, `nodes`, and `paths` layers.
+- Preserve exact Dijkstra predecessor paths so every X edge can be exported as its actual road-network route.
+- Add node latitude/longitude in EPSG:4326 plus directed in-degree and out-degree.
+- Add `OUTPUTS.txt` with stable artifact descriptions and run-specific network/path statistics.
+- Add `sigma-engine area <area>` to resolve sigma-siphon `areas.yml`, reuse valid existing POIs, or invoke sigma-siphon when they are absent.
+- Materialize only the selected area boundary from sigma-siphon's national boundary GeoPackage.
+- Keep the road dataset explicit: sigma-siphon currently does not publish the routable road network required by SIGMA Engine.

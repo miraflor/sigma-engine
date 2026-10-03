@@ -228,8 +228,19 @@ def instantiate_network(
             target_nodes = np.fromiter(
                 (candidate[3] for candidate in candidates), dtype=np.int64, count=len(candidates)
             )
-            road_distances = road.distances_to_targets(source_network_node, target_nodes)
-            for candidate, road_distance in zip(candidates, road_distances, strict=True):
+            if hasattr(road, "shortest_paths_to_targets"):
+                road_distances, road_paths = road.shortest_paths_to_targets(
+                    source_network_node, target_nodes
+                )
+            else:  # compatibility for lightweight distance-only test/adaptor objects
+                road_distances = road.distances_to_targets(source_network_node, target_nodes)
+                road_paths = [
+                    (source_network_node, int(target)) if np.isfinite(distance) else None
+                    for target, distance in zip(target_nodes, road_distances, strict=True)
+                ]
+            for candidate, road_distance, road_path in zip(
+                candidates, road_distances, road_paths, strict=True
+            ):
                 type2, cluster1, cluster2, _, dag_weight = candidate
                 road_distance = float(road_distance)
                 if not np.isfinite(road_distance):
@@ -245,6 +256,8 @@ def instantiate_network(
                     continue
                 if road_distance < 0:
                     raise RuntimeError("shortest-path engine returned a negative road distance")
+                if road_path is None:
+                    raise RuntimeError("connected X edge is missing its shortest road path")
 
                 # The requested SIGMA edge definition is multiplicative.  This makes longer
                 # road distance increase edge weight (rather than act as a distance penalty);
@@ -255,6 +268,7 @@ def instantiate_network(
                     make_node_id(type2, cluster2),
                     dag_weight=dag_weight,
                     road_distance=road_distance,
+                    road_path=road_path,
                     weight=combined_weight,
                 )
 

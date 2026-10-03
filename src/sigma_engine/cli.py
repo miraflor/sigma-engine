@@ -7,6 +7,12 @@ from typing import Annotated
 
 import typer
 
+from .area_integration import (
+    load_area_definition,
+    prepare_area_inputs,
+    resolve_areas_file,
+    resolve_siphon_root,
+)
 from .pipeline import ContinueConfig, EngineConfig, run_engine, run_from_partitions
 
 app = typer.Typer(
@@ -182,6 +188,206 @@ def run(
     try:
         result = run_engine(config)
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    _emit_result(result)
+
+
+@app.command("area")
+def run_area(
+    area: Annotated[
+        str,
+        typer.Argument(help="Area slug, exact name, or alias from sigma-siphon areas.yml"),
+    ],
+    roads: Annotated[
+        Path, typer.Option("--roads", help="Projected road line dataset required by sigma-engine.")
+    ],
+    output_dir: Annotated[
+        Path | None,
+        typer.Option("--output-dir", help="Engine output directory; default ./output/<area-slug>."),
+    ] = None,
+    siphon_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--siphon-root",
+            help="sigma-siphon checkout; auto-detects a sibling checkout.",
+        ),
+    ] = None,
+    areas_file: Annotated[
+        Path | None,
+        typer.Option("--areas-file", help="Alternate sigma-siphon areas.yml."),
+    ] = None,
+    siphon_output_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--siphon-output-root",
+            help="sigma-siphon output root; default <siphon-root>/output.",
+        ),
+    ] = None,
+    siphon_cache_dir: Annotated[
+        Path | None,
+        typer.Option("--siphon-cache-dir", help="Optional sigma-siphon cache root."),
+    ] = None,
+    refresh_siphon: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-siphon",
+            help="Re-run sigma-siphon even when a valid area output exists.",
+        ),
+    ] = False,
+    technical_coefficients: Annotated[
+        Path | None,
+        typer.Option(
+            "--technical-coefficients", help="Optional technical-coefficient matrix override."
+        ),
+    ] = None,
+    transactions: Annotated[
+        Path | None,
+        typer.Option("--transactions", help="Optional transaction-table override."),
+    ] = None,
+    classification: Annotated[
+        str, typer.Option("--classification", help="io80 (default) or io16.")
+    ] = "io80",
+    roads_layer: Annotated[
+        str | None, typer.Option("--roads-layer", help="Road layer for multi-layer input.")
+    ] = None,
+    transactions_sheet: Annotated[
+        str, typer.Option("--transactions-sheet", help="Worksheet name or zero-based index.")
+    ] = "0",
+    technical_coefficients_sheet: Annotated[
+        str,
+        typer.Option("--technical-coefficients-sheet", help="Worksheet name or zero-based index."),
+    ] = "0",
+    mwas_method: Annotated[
+        str, typer.Option("--mwas-method", help="fast (default) or exact.")
+    ] = "fast",
+    min_cluster_size: Annotated[
+        int, typer.Option("--min-cluster-size", help="Network HDBSCAN minimum cluster size.")
+    ] = 5,
+    min_samples: Annotated[
+        int | None, typer.Option("--min-samples", help="HDBSCAN min_samples; defaults internally.")
+    ] = None,
+    cluster_selection_method: Annotated[
+        str, typer.Option("--cluster-selection-method", help="eom or leaf.")
+    ] = "eom",
+    allow_single_cluster: Annotated[
+        bool, typer.Option("--allow-single-cluster", help="Allow one HDBSCAN cluster per type.")
+    ] = False,
+    hdbscan_max_distance: Annotated[
+        float, typer.Option("--hdbscan-max-distance", help="Maximum road-neighbour radius.")
+    ] = 5_000.0,
+    hdbscan_distance_mode: Annotated[
+        str, typer.Option("--hdbscan-distance-mode", help="adaptive (default) or fixed.")
+    ] = "adaptive",
+    hdbscan_min_distance: Annotated[
+        float | None, typer.Option("--hdbscan-min-distance", help="First adaptive search radius.")
+    ] = None,
+    hdbscan_max_neighbor_pairs: Annotated[
+        int, typer.Option("--hdbscan-max-neighbor-pairs", help="Sparse pair safety cap.")
+    ] = 20_000_000,
+    max_snap_distance: Annotated[
+        float | None, typer.Option("--max-snap-distance", help="Optional point-to-road QA limit.")
+    ] = None,
+    vertex_digits: Annotated[
+        int, typer.Option("--vertex-digits", help="Road vertex canonicalization digits.")
+    ] = 11,
+    voronoi_resolution: Annotated[
+        float,
+        typer.Option("--voronoi-resolution", help="Initial network-Voronoi surface resolution."),
+    ] = 500.0,
+    voronoi_max_cells: Annotated[
+        int, typer.Option("--voronoi-max-cells", help="Network-Voronoi grid-cell safety cap.")
+    ] = 1_000_000,
+    voronoi_refine_factor: Annotated[
+        float, typer.Option("--voronoi-refine-factor", help="Resolution multiplier on refinement.")
+    ] = 0.5,
+    voronoi_max_refinements: Annotated[
+        int, typer.Option("--voronoi-max-refinements", help="Maximum network-only refinements.")
+    ] = 5,
+    centrality_direction: Annotated[
+        str,
+        typer.Option(
+            "--centrality-direction", help="Compatibility option; incoming or outgoing."
+        ),
+    ] = "incoming",
+    distance_tempering: Annotated[
+        float, typer.Option("--distance-tempering", help="Point attenuation lambda; default 0.15.")
+    ] = 0.15,
+    progress: Annotated[
+        bool, typer.Option("--progress/--no-progress", help="Show stage progress.")
+    ] = True,
+) -> None:
+    """Run SIGMA by sigma-siphon area, reusing or creating classified POIs automatically."""
+    try:
+        resolved_siphon_root = resolve_siphon_root(siphon_root)
+        resolved_areas_file = resolve_areas_file(resolved_siphon_root, areas_file)
+        resolved_area = load_area_definition(area, resolved_areas_file)
+        engine_output = (
+            output_dir.expanduser().resolve()
+            if output_dir is not None
+            else (Path.cwd() / "output" / resolved_area.slug).resolve()
+        )
+
+        def report(message: str) -> None:
+            if progress:
+                typer.echo(f"[sigma-engine] {message}")
+
+        inputs = prepare_area_inputs(
+            resolved_area.slug,
+            engine_output_dir=engine_output,
+            classification=classification,
+            siphon_root=resolved_siphon_root,
+            areas_file=resolved_areas_file,
+            siphon_output_root=siphon_output_root,
+            siphon_cache_dir=siphon_cache_dir,
+            refresh_siphon=refresh_siphon,
+            progress=report,
+        )
+        report(
+            "sigma-siphon handoff: "
+            + ("generated fresh POIs" if inputs.siphon_was_run else "reused existing POIs")
+        )
+        config = EngineConfig(
+            roads_path=str(roads),
+            boundary_path=str(inputs.boundary_path),
+            output_dir=str(engine_output),
+            points_path=str(inputs.points_path),
+            technical_coefficients_path=(
+                str(technical_coefficients) if technical_coefficients else None
+            ),
+            classification=classification,
+            transactions_override_path=str(transactions) if transactions else None,
+            roads_layer=roads_layer,
+            boundary_layer=inputs.boundary_layer,
+            transactions_sheet=_sheet(transactions_sheet),
+            technical_coefficients_sheet=_sheet(technical_coefficients_sheet),
+            mwas_method=mwas_method,
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+            cluster_selection_method=cluster_selection_method,
+            allow_single_cluster=allow_single_cluster,
+            hdbscan_max_distance=hdbscan_max_distance,
+            hdbscan_distance_mode=hdbscan_distance_mode,
+            hdbscan_min_distance=hdbscan_min_distance,
+            hdbscan_max_neighbor_pairs=hdbscan_max_neighbor_pairs,
+            max_snap_distance=max_snap_distance,
+            vertex_digits=vertex_digits,
+            voronoi_resolution=voronoi_resolution,
+            voronoi_max_cells=voronoi_max_cells,
+            voronoi_refine_factor=voronoi_refine_factor,
+            voronoi_max_refinements=voronoi_max_refinements,
+            centrality_direction=centrality_direction,
+            distance_tempering=distance_tempering,
+            progress=progress,
+            area_slug=inputs.area.slug,
+            area_name=inputs.area.name,
+            sigma_siphon_points_path=str(inputs.points_path),
+            sigma_siphon_run_json=(
+                str(inputs.siphon_run_json) if inputs.siphon_run_json is not None else None
+            ),
+        )
+        result = run_engine(config)
+    except (FileNotFoundError, KeyError, ValueError, RuntimeError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     _emit_result(result)

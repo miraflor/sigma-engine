@@ -31,6 +31,13 @@ from .io_workflow import (
     read_total_output_vector,
 )
 from .network import AugmentedNetwork, RoadNetwork, SnappedPoints
+from .outputs import (
+    build_x_edge_outputs,
+    build_x_node_outputs,
+    spatial_summary,
+    write_outputs_description,
+    write_spatial_geopackage,
+)
 from .point_input import prepare_point_input
 from .scoring import tempered_point_scores
 from .spatial_graph import directed_eigenvector_centrality, instantiate_network, make_node_id
@@ -84,6 +91,12 @@ class EngineConfig:
     centrality_direction: CentralityDirection = "incoming"
     distance_tempering: float = 0.15
     progress: bool = False
+
+    # Optional provenance populated by the area/sigma-siphon entrypoint.
+    area_slug: str | None = None
+    area_name: str | None = None
+    sigma_siphon_points_path: str | None = None
+    sigma_siphon_run_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -458,7 +471,15 @@ def _x_artifacts(
     *,
     centrality_direction: str,
     progress: bool,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, float], dict[str, object]]:
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    gpd.GeoDataFrame,
+    gpd.GeoDataFrame,
+    dict[str, float],
+    dict[str, object],
+]:
     graph, disconnected = instantiate_network(
         centers,
         partitions,
@@ -468,33 +489,8 @@ def _x_artifacts(
     )
     centrality = directed_eigenvector_centrality(graph, centrality_direction)
 
-    node_rows: list[dict[str, object]] = []
-    for node, data in sorted(graph.nodes(data=True), key=lambda item: str(item[0])):
-        node_rows.append(
-            {
-                "type": str(data["type"]),
-                "cluster": int(data["cluster"]),
-                "centrality": float(centrality.values[str(node)]),
-            }
-        )
-
-    edge_rows: list[dict[str, object]] = []
-    for source, target, data in sorted(
-        graph.edges(data=True), key=lambda edge: (str(edge[0]), str(edge[1]))
-    ):
-        source_data = graph.nodes[source]
-        target_data = graph.nodes[target]
-        edge_rows.append(
-            {
-                "source_type": str(source_data["type"]),
-                "source_cluster": int(source_data["cluster"]),
-                "target_type": str(target_data["type"]),
-                "target_cluster": int(target_data["cluster"]),
-                "technical_coefficient": float(data["dag_weight"]),
-                "road_distance": float(data["road_distance"]),
-                "edge_weight": float(data["weight"]),
-            }
-        )
+    nodes, node_geometries = build_x_node_outputs(graph, centrality.values, centers.crs)
+    edges, path_geometries = build_x_edge_outputs(graph, road)
 
     disconnected_rows: list[dict[str, object]] = []
     for row in disconnected.to_dict("records"):
@@ -507,20 +503,6 @@ def _x_artifacts(
                 "reason": str(row["status"]),
             }
         )
-
-    nodes = pd.DataFrame(node_rows, columns=["type", "cluster", "centrality"])
-    edges = pd.DataFrame(
-        edge_rows,
-        columns=[
-            "source_type",
-            "source_cluster",
-            "target_type",
-            "target_cluster",
-            "technical_coefficient",
-            "road_distance",
-            "edge_weight",
-        ],
-    )
     disconnected_out = pd.DataFrame(
         disconnected_rows,
         columns=[
@@ -540,8 +522,27 @@ def _x_artifacts(
         "centrality_direction": centrality.direction,
         "centrality_degenerate_dag": bool(centrality.degenerate_dag),
         "centrality_note": centrality.note,
+        "road_distance_crs": str(road.crs),
+        "road_distance_unit": (
+            road.crs.axis_info[0].unit_name
+            if getattr(road.crs, "axis_info", None)
+            else "projected CRS units"
+        ),
+        **spatial_summary(
+            partitions=partitions,
+            nodes=node_geometries,
+            paths=path_geometries,
+        ),
     }
-    return nodes, edges, disconnected_out, centrality.values, meta
+    return (
+        nodes,
+        edges,
+        disconnected_out,
+        node_geometries,
+        path_geometries,
+        centrality.values,
+        meta,
+    )
 
 
 def _write_late_stage_outputs(
@@ -595,7 +596,15 @@ def _run_steps_5_to_7(
     )
 
     _report(progress, "Step 6: positive-area partition overlaps + median road distances")
-    x_nodes, x_edges, disconnected, centrality, x_meta = _x_artifacts(
+    (
+        x_nodes,
+        x_edges,
+        disconnected,
+        x_node_geometries,
+        x_path_geometries,
+        centrality,
+        x_meta,
+    ) = _x_artifacts(
         centers,
         partitions,
         io_result.graph,
@@ -622,6 +631,13 @@ def _run_steps_5_to_7(
         disconnected,
         final_points,
     )
+    spatial_path = write_spatial_geopackage(
+        output_dir / "sigma_spatial_outputs.gpkg",
+        partitions,
+        x_node_geometries,
+        x_path_geometries,
+    )
+    output_paths["spatial_gpkg"] = str(spatial_path)
 
     meta = {
         "cluster_count": cluster_count,
@@ -632,6 +648,7 @@ def _run_steps_5_to_7(
         "mwas_source_edges": int(io_result.mwas.source_edge_count),
         "mwas_retained_edges": int(io_result.mwas.retained_edge_count),
         "distance_tempering": float(distance_tempering),
+        "scored_points": int(len(final_points)),
         **x_meta,
     }
     return final_points, output_paths, meta
@@ -798,6 +815,10 @@ def run_engine(config: EngineConfig) -> EngineResult:
         "entrypoint": "full",
         "classification": config.classification,
         "classification_column": point_info.classification_column,
+        "area_slug": config.area_slug,
+        "area_name": config.area_name,
+        "sigma_siphon_points_path": config.sigma_siphon_points_path,
+        "sigma_siphon_run_json": config.sigma_siphon_run_json,
         "transaction_source": getattr(io_info, "source_id", None),
         "technical_coefficient_source": coefficients.attrs.get(
             "technical_coefficient_source"
@@ -818,6 +839,9 @@ def run_engine(config: EngineConfig) -> EngineResult:
     metadata_path = output_dir / "sigma_run_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
     paths["metadata"] = str(metadata_path)
+    description_target = output_dir / "OUTPUTS.txt"
+    paths["description"] = str(description_target)
+    write_outputs_description(description_target, metadata=metadata, output_paths=paths)
     return EngineResult(final_points, centers, partitions, paths, metadata)
 
 
@@ -1018,6 +1042,9 @@ def run_from_partitions(config: ContinueConfig) -> EngineResult:
     metadata_path = output_dir / "sigma_run_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
     paths["metadata"] = str(metadata_path)
+    description_target = output_dir / "OUTPUTS.txt"
+    paths["description"] = str(description_target)
+    write_outputs_description(description_target, metadata=metadata, output_paths=paths)
     return EngineResult(final_points, centers, partitions, paths, metadata)
 
 

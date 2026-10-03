@@ -53,6 +53,8 @@ The key Step-5 rule is strict: **transactions select edges; technical coefficien
 | 6 | `sigma_X_edges.csv` | qualifying directed cluster pairs with `A`, road distance, and `A*d` |
 | 6 | `sigma_disconnected_overlap_pairs.csv` | positive-area overlaps whose medians are road-disconnected |
 | 7 | `sigma_points_centrality.parquet` | final bounded point-level SIGMA score |
+| GIS | `sigma_spatial_outputs.gpkg` | one GeoPackage with `clusters`, `nodes`, and exact shortest-road `paths` layers in EPSG:4326 |
+| Run | `OUTPUTS.txt` | standard description of every output plus run-specific counts and network/path diagnostics |
 
 The public Step-2/3/4 artifacts are also the durable restart boundaries. The reset does not hide a second competing semantic state inside checkpoint-only files.
 
@@ -101,6 +103,51 @@ score = cluster_centrality * (1 - 0.15*q)
 ```
 
 so the default score lies between `0.85*C` and `C`.
+
+## Run directly from a sigma-siphon area
+
+When sigma-siphon is available as a sibling checkout (or `SIGMA_SIPHON_ROOT` / `--siphon-root`
+is set), SIGMA Engine can resolve the same `areas.yml`, reuse an existing valid area output,
+or run sigma-siphon automatically when the POI output is absent:
+
+```powershell
+sigma-engine area pasig `
+  --roads "C:\path\pasig_roads_projected.gpkg"
+```
+
+The default engine output is `./output/<area-slug>`. The integration:
+
+1. resolves the area slug/name/alias from sigma-siphon's `areas.yml`;
+2. checks `<sigma-siphon>/output/<area>/pois.parquet` for a usable `io80_code` or `io16_code`;
+3. reuses it when valid, otherwise launches sigma-siphon's acquisition/classification pipeline;
+4. materializes exactly the selected configured boundary into the engine output `_inputs` folder;
+5. runs the ordinary seven-step SIGMA workflow using those POIs and that boundary.
+
+`--roads` remains required because sigma-siphon does not currently publish a routable road-line
+artifact. This command deliberately does not invent a second road acquisition workflow.
+Use `--refresh-siphon` to force a new sigma-siphon area run. `--siphon-output-root`,
+`--siphon-cache-dir`, and `--areas-file` are available for non-default layouts.
+
+## Spatial GIS output
+
+Every full or `from-partitions` run writes `sigma_spatial_outputs.gpkg` with three layers:
+
+- `clusters`: every sector/type's cluster partition in one layer, keyed by `type`, `cluster_no`,
+  and `cluster_id`; a separate file per sector is unnecessary;
+- `nodes`: network-X nodes with `type`, `cluster_no`, `lat`, `lon`, `in_degree`, `out_degree`,
+  and centrality;
+- `paths`: the exact road-network shortest route used for each X edge, tagged by from/to type
+  and cluster plus road distance, technical coefficient, and X edge weight.
+
+The path layer is reconstructed from the Dijkstra predecessor tree used for the corresponding
+X-edge distance. It is therefore the actual route on the augmented road graph, not a straight
+or curved schematic connection between cluster centers. The GeoPackage layers are exported in
+EPSG:4326 for direct GIS use; numeric `road_distance` remains the value measured in the projected
+road-network CRS used by the engine.
+
+`OUTPUTS.txt` accompanies the machine-readable `sigma_run_metadata.json` and describes every
+artifact plus run-specific values such as counts of represented types, clusters, X edges,
+disconnected overlap pairs, degree summaries, and shortest-route length summaries.
 
 ## Continue immediately from existing partitions
 
@@ -165,7 +212,9 @@ src/sigma_engine/
   io_workflow.py    # Z -> MWAS edge set -> A reweighting
   scoring.py        # cluster-p90 bounded point score
   pipeline.py       # seven-step orchestration + restart from Step 4
-  cli.py            # run / from-partitions
+  outputs.py        # GeoPackage layers + OUTPUTS.txt
+  area_integration.py # sigma-siphon area resolution/handoff
+  cli.py            # run / area / from-partitions
 ```
 
 Existing spatial primitives (`network.py`, `clustering.py`, `center.py`, `voronoi.py`, `spatial_graph.py`, sparse solvers, packaged IO resources) remain in place.

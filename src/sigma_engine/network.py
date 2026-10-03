@@ -680,3 +680,120 @@ class AugmentedNetwork:
         )
         out[same_component] = values[target_array[same_component]]
         return out
+
+
+    def shortest_paths_to_targets(
+        self, source: int, targets: np.ndarray | list[int] | tuple[int, ...]
+    ) -> tuple[np.ndarray, list[tuple[int, ...] | None]]:
+        """Return exact shortest distances and road-node paths to requested targets.
+
+        This is the geometry-preserving counterpart of :meth:`distances_to_targets`.
+        One SciPy Dijkstra run is performed for the source with a predecessor vector,
+        then only the requested target paths are reconstructed.  The predecessor vector
+        is discarded on return, so memory remains bounded by one single-source solve.
+        """
+        source = int(source)
+        target_array = np.asarray(targets, dtype=np.int64)
+        if target_array.ndim != 1:
+            raise ValueError("targets must be one-dimensional")
+        n = self.sparse_adjacency.shape[0]
+        if not 0 <= source < n:
+            raise ValueError(f"unknown network source node: {source}")
+        if target_array.size == 0:
+            return np.empty(0, dtype=float), []
+        if target_array.min() < 0 or target_array.max() >= n:
+            raise ValueError("target list contains an unknown network node")
+
+        out = np.full(target_array.shape, np.inf, dtype=float)
+        paths: list[tuple[int, ...] | None] = [None] * len(target_array)
+        same_component = self.sparse_component[target_array] == self.sparse_component[source]
+        if not bool(same_component.any()):
+            return out, paths
+
+        values, predecessors = dijkstra(
+            self.sparse_adjacency,
+            directed=True,
+            indices=source,
+            return_predecessors=True,
+        )
+        values = np.asarray(values, dtype=float)
+        predecessors = np.asarray(predecessors, dtype=np.int64)
+        out[same_component] = values[target_array[same_component]]
+
+        for position in np.flatnonzero(same_component):
+            target = int(target_array[position])
+            if target == source:
+                paths[int(position)] = (source,)
+                continue
+            if not np.isfinite(out[position]):
+                continue
+            reverse_path = [target]
+            cursor = target
+            # SciPy uses -9999 for an unreachable/no-predecessor vertex.  A finite
+            # distance in the same connected component should always reach source.
+            for _ in range(n):
+                predecessor = int(predecessors[cursor])
+                if predecessor < 0:
+                    raise RuntimeError(
+                        f"could not reconstruct shortest road path {source}->{target}"
+                    )
+                reverse_path.append(predecessor)
+                cursor = predecessor
+                if cursor == source:
+                    break
+            else:
+                raise RuntimeError(
+                    f"shortest road path {source}->{target} exceeded graph size"
+                )
+            paths[int(position)] = tuple(reversed(reverse_path))
+        return out, paths
+
+    @cached_property
+    def _edge_geometry_lookup(self) -> dict[tuple[int, int], tuple[LineString, bool]]:
+        """Map either orientation of an augmented graph edge to its stored line geometry."""
+        lookup: dict[tuple[int, int], tuple[LineString, bool]] = {}
+        for row in self.edges.itertuples(index=False):
+            u, v = int(row.u), int(row.v)
+            geometry = row.geometry
+            lookup[(u, v)] = (geometry, False)
+            lookup[(v, u)] = (geometry, True)
+        return lookup
+
+    def path_geometry(self, path_nodes: tuple[int, ...] | list[int]) -> LineString:
+        """Convert a shortest-path road-node sequence to one oriented LineString.
+
+        The stored augmented edge geometry is used, not straight center-to-center chords.
+        A zero-distance path (source and target are the same inserted road node) is encoded
+        as a two-coordinate zero-length LineString so it can still be stored in a line layer.
+        """
+        nodes = tuple(int(node) for node in path_nodes)
+        if not nodes:
+            raise ValueError("path_nodes must not be empty")
+        if len(nodes) == 1:
+            point = self.nodes.loc[
+                self.nodes["network_node"].astype(int) == nodes[0], "geometry"
+            ]
+            if len(point) != 1:
+                raise RuntimeError(f"unknown network node in road path: {nodes[0]}")
+            xy = tuple(point.iloc[0].coords[0][:2])
+            return LineString([xy, xy])
+
+        coordinates: list[tuple[float, float]] = []
+        for u, v in zip(nodes[:-1], nodes[1:], strict=True):
+            try:
+                geometry, reverse = self._edge_geometry_lookup[(u, v)]
+            except KeyError as exc:
+                raise RuntimeError(f"road path references missing edge {u}<->{v}") from exc
+            edge_coordinates = [tuple(value[:2]) for value in geometry.coords]
+            if reverse:
+                edge_coordinates.reverse()
+            if coordinates and edge_coordinates:
+                if coordinates[-1] == edge_coordinates[0]:
+                    coordinates.extend(edge_coordinates[1:])
+                else:
+                    coordinates.extend(edge_coordinates)
+            else:
+                coordinates.extend(edge_coordinates)
+        if len(coordinates) < 2:
+            raise RuntimeError("road path geometry contains fewer than two coordinates")
+        return LineString(coordinates)
